@@ -13,6 +13,17 @@
 - **剪贴板导入**：打开 App 或回到前台时，自动识别剪贴板里的 YouTube / Telegram 链接。
 - **分享扩展**：从其他 App 的分享面板直接发送链接到拾影。
 
+## 使用教程
+
+完整的图文教程（导入、下载队列、播放、废纸篓、Telegram 扫码登录、常见问题）见 **[docs/USAGE.md](docs/USAGE.md)**。
+
+<p align="center">
+  <img src="docs/images/library.jpg" width="24%" alt="YouTube 片库" />
+  <img src="docs/images/telegram-library.jpg" width="24%" alt="Telegram 片库" />
+  <img src="docs/images/downloads.jpg" width="24%" alt="下载队列" />
+  <img src="docs/images/trash.jpg" width="24%" alt="废纸篓" />
+</p>
+
 ## 环境要求
 
 - iOS 17.0 及以上
@@ -50,6 +61,9 @@ TDLib 的会话数据库与文件缓存位于 App 沙盒的 `Telegram/` 目录�
 ```
 .
 ├── README.md
+├── docs/
+│   ├── USAGE.md              # 图文使用教程
+│   └── images/               # 教程截图
 ├── Scripts/
 │   └── build-ipa.sh          # WSL 同步 + 签名构建
 └── Shiying/
