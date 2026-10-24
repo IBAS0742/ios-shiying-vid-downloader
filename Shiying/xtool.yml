@@ -1,0 +1,9 @@
+version: 1
+bundleID: com.ibas.shiying
+product: Shiying
+infoPath: AppInfo.plist
+iconPath: Resources/AppIcon.png
+extensions:
+  - product: ShiyingShare
+    infoPath: ShareInfo.plist
+    bundleID: com.ibas.shiying.share

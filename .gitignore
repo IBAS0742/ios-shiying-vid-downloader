@@ -1,0 +1,11 @@
+# macOS / Windows
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local research notes and upstream clones
+/_research/
+
+# Editor folders
+.idea/
+.vscode/

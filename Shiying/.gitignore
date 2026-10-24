@@ -1,0 +1,21 @@
+# SwiftPM / build output
+.build/
+.swiftpm/
+.bsp/
+.ipa-check/
+DerivedData/
+xtool/
+*.ipa
+*.xcuserstate
+xcuserdata/
+
+# Local runtime data, screenshots and logs
+*.log
+screens/
+testdata/
+library.json
+
+# Device automation scripts contain local signing identifiers and paths
+Scripts/
+
+.netrc
