@@ -28,6 +28,10 @@ enum AppPaths {
         directory(for: id).appendingPathComponent("thumbnail.jpg")
     }
 
+    static func partsDirectory(for id: UUID, kind: String) -> URL {
+        directory(for: id).appendingPathComponent("parts-\(kind)", isDirectory: true)
+    }
+
     static func createDirectory(for id: UUID) {
         try? FileManager.default.createDirectory(at: directory(for: id), withIntermediateDirectories: true)
     }
@@ -41,5 +45,21 @@ enum AppPaths {
         formatter.allowedUnits = [.useMB, .useGB]
         formatter.countStyle = .file
         return formatter.string(fromByteCount: bytes)
+    }
+
+    static func formatSpeed(_ bytesPerSecond: Double) -> String? {
+        guard bytesPerSecond.isFinite, bytesPerSecond > 0 else { return nil }
+        if bytesPerSecond < 1024 {
+            return "\(Int(bytesPerSecond)) B/s"
+        }
+        let kilobytes = bytesPerSecond / 1024
+        if kilobytes < 1024 {
+            return String(format: "%.0f KB/s", kilobytes)
+        }
+        let megabytes = kilobytes / 1024
+        if megabytes < 10 {
+            return String(format: "%.1f MB/s", megabytes)
+        }
+        return String(format: "%.0f MB/s", megabytes)
     }
 }

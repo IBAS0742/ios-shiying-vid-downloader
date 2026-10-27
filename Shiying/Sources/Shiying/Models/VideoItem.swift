@@ -18,6 +18,9 @@ struct VideoItem: Identifiable, Codable, Equatable {
     var duration: Double
     var resolution: Int?
     var addedAt: Date
+    /// Manual position inside its source playlist. `nil` means the item keeps
+    /// the default newest-first position until the user reorders the list.
+    var manualOrder: Int?
     var status: Status
     var errorMessage: String?
     var hasSeparateAudio: Bool
@@ -30,6 +33,11 @@ struct VideoItem: Identifiable, Codable, Equatable {
     var source: MediaSource
     var directMediaURL: String?
     var remoteThumbnailURL: String?
+    /// Stable Telegram locator. TDLib file ids can be reused for different
+    /// files after cached files are deleted, so downloads re-resolve the file
+    /// id from this chat/message pair.
+    var telegramChatID: Int64?
+    var telegramMessageID: Int?
 
     init(
         id: UUID = UUID(),
@@ -51,6 +59,7 @@ struct VideoItem: Identifiable, Codable, Equatable {
         self.duration = duration
         self.addedAt = addedAt
         self.resolution = nil
+        self.manualOrder = nil
         self.status = .queued
         self.errorMessage = nil
         self.hasSeparateAudio = false
@@ -63,6 +72,8 @@ struct VideoItem: Identifiable, Codable, Equatable {
         self.source = source
         self.directMediaURL = directMediaURL
         self.remoteThumbnailURL = remoteThumbnailURL
+        self.telegramChatID = nil
+        self.telegramMessageID = nil
     }
 
     var thumbnailFileURL: URL {
@@ -117,6 +128,7 @@ struct VideoItem: Identifiable, Codable, Equatable {
         case duration
         case resolution
         case addedAt
+        case manualOrder
         case status
         case errorMessage
         case hasSeparateAudio
@@ -129,6 +141,8 @@ struct VideoItem: Identifiable, Codable, Equatable {
         case source
         case directMediaURL
         case remoteThumbnailURL
+        case telegramChatID
+        case telegramMessageID
     }
 
     init(from decoder: Decoder) throws {
@@ -141,6 +155,7 @@ struct VideoItem: Identifiable, Codable, Equatable {
         duration = try container.decodeIfPresent(Double.self, forKey: .duration) ?? 0
         resolution = try container.decodeIfPresent(Int.self, forKey: .resolution)
         addedAt = try container.decodeIfPresent(Date.self, forKey: .addedAt) ?? Date()
+        manualOrder = try container.decodeIfPresent(Int.self, forKey: .manualOrder)
         status = try container.decodeIfPresent(Status.self, forKey: .status) ?? .failed
         errorMessage = try container.decodeIfPresent(String.self, forKey: .errorMessage)
         hasSeparateAudio = try container.decodeIfPresent(Bool.self, forKey: .hasSeparateAudio) ?? false
@@ -153,5 +168,7 @@ struct VideoItem: Identifiable, Codable, Equatable {
         source = try container.decodeIfPresent(MediaSource.self, forKey: .source) ?? .youtube
         directMediaURL = try container.decodeIfPresent(String.self, forKey: .directMediaURL)
         remoteThumbnailURL = try container.decodeIfPresent(String.self, forKey: .remoteThumbnailURL)
+        telegramChatID = try container.decodeIfPresent(Int64.self, forKey: .telegramChatID)
+        telegramMessageID = try container.decodeIfPresent(Int.self, forKey: .telegramMessageID)
     }
 }

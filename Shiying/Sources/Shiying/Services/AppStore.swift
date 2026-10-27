@@ -36,24 +36,91 @@ final class AppStore: ObservableObject {
             pumpDownloadQueue()
         }
     }
+    /// Number of parallel range connections used for YouTube media files.
+    @Published var youtubeSegments: Int = 4 {
+        didSet {
+            UserDefaults.standard.set(youtubeSegments, forKey: Self.youtubeSegmentsKey)
+        }
+    }
+    /// Baseline playback speed used whenever a video starts. Holding the video
+    /// in the built-in player temporarily adds 0.5x on top of this value.
+    @Published var playbackRate: Double = 1.0 {
+        didSet {
+            UserDefaults.standard.set(playbackRate, forKey: Self.playbackRateKey)
+        }
+    }
+    /// Moves watched YouTube videos to the trash by default. Users can keep
+    /// them in the playlist independently from Telegram videos.
+    @Published var autoDeleteYouTubeAfterPlayback: Bool = true {
+        didSet {
+            UserDefaults.standard.set(
+                autoDeleteYouTubeAfterPlayback,
+                forKey: Self.autoDeleteYouTubeKey
+            )
+        }
+    }
+    /// Moves watched Telegram videos to the trash by default.
+    @Published var autoDeleteTelegramAfterPlayback: Bool = true {
+        didSet {
+            UserDefaults.standard.set(
+                autoDeleteTelegramAfterPlayback,
+                forKey: Self.autoDeleteTelegramKey
+            )
+        }
+    }
+    /// Telegram chats pinned by the user. They are shown above the rest of the
+    /// list every time the Telegram browser loads.
+    @Published private(set) var pinnedTelegramChatIDs: Set<Int64> = []
     @Published private(set) var downloadsPaused = false
+    @Published private(set) var downloadSpeeds: [UUID: Double] = [:]
 
     nonisolated static let trashRetentionDays = 7
     nonisolated static let maxAutoRetries = 5
     nonisolated static let retryDelaySeconds = 10
+    nonisolated static let playbackRateOptions: [Double] = [0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4]
     private static let downloadQualityKey = "shiying.downloadQuality"
     private static let autoReadClipboardKey = "shiying.autoReadClipboard"
     private static let maxConcurrentDownloadsKey = "shiying.maxConcurrentDownloads"
+    private static let youtubeSegmentsKey = "shiying.youtubeSegments"
+    private static let playbackRateKey = "shiying.playbackRate"
+    private static let autoDeleteYouTubeKey = "shiying.autoDeleteYouTubeAfterPlayback"
+    private static let autoDeleteTelegramKey = "shiying.autoDeleteTelegramAfterPlayback"
+    private static let pinnedTelegramChatsKey = "shiying.pinnedTelegramChatIDs"
+
+    private struct SpeedSample {
+        let date: Date
+        let bytes: Int64
+        let bytesPerSecond: Double
+    }
 
     private var kindProgress: [UUID: [String: Double]] = [:]
+    private var speedSamples: [UUID: [String: SpeedSample]] = [:]
     private var isRecovering = false
     private var toastTask: Task<Void, Never>?
     private var housekeepingTimer: Timer?
+    private var speedTimer: Timer?
     private var retryTasks: [UUID: Task<Void, Never>] = [:]
     private var resolveTasks: [UUID: Task<Void, Never>] = [:]
 
     var playlist: [VideoItem] {
-        items.filter { !$0.isTrashed }.sorted { $0.addedAt > $1.addedAt }
+        items.filter { !$0.isTrashed }.sorted(by: Self.playlistOrder)
+    }
+
+    /// Manually reordered items keep their saved positions. Items that have not
+    /// been placed yet (for example a freshly downloaded video) stay on top in
+    /// newest-first order, matching the previous behavior.
+    private static func playlistOrder(_ lhs: VideoItem, _ rhs: VideoItem) -> Bool {
+        switch (lhs.manualOrder, rhs.manualOrder) {
+        case let (left?, right?):
+            if left != right { return left < right }
+        case (.some, .none):
+            return false
+        case (.none, .some):
+            return true
+        case (.none, .none):
+            break
+        }
+        return lhs.addedAt > rhs.addedAt
     }
 
     var downloadsGroup: [VideoItem] {
@@ -68,10 +135,69 @@ final class AppStore: ObservableObject {
         items.filter { !$0.isTrashed && $0.status == .queued }.count
     }
 
+    /// Whether any download still needs to make progress, including items
+    /// waiting for a free slot or an automatic retry.
+    var hasActiveDownloadWork: Bool {
+        guard !downloadsPaused else { return false }
+        return items.contains {
+            !$0.isTrashed && ($0.status == .queued || $0.status == .resolving
+                || $0.status == .downloading || $0.status == .retrying)
+        }
+    }
+
     func playbackQueue(for item: VideoItem, inTrash: Bool = false) -> [VideoItem] {
         let base = inTrash ? trash : playlist
         let queue = base.filter { $0.source == item.source && $0.status == .ready }
         return queue.isEmpty ? [item] : queue
+    }
+
+    /// Whether watched videos of this source should move to the trash.
+    func autoDeletesAfterPlayback(for source: MediaSource) -> Bool {
+        switch source {
+        case .youtube:
+            return autoDeleteYouTubeAfterPlayback
+        case .telegram:
+            return autoDeleteTelegramAfterPlayback
+        }
+    }
+
+    func isTelegramChatPinned(_ chatID: Int64) -> Bool {
+        pinnedTelegramChatIDs.contains(chatID)
+    }
+
+    func toggleTelegramChatPin(_ chatID: Int64) {
+        var updated = pinnedTelegramChatIDs
+        if updated.contains(chatID) {
+            updated.remove(chatID)
+        } else {
+            updated.insert(chatID)
+        }
+        pinnedTelegramChatIDs = updated
+        UserDefaults.standard.set(
+            updated.map(String.init),
+            forKey: Self.pinnedTelegramChatsKey
+        )
+        AppLog.info("telegram pin toggled chat=\(chatID) pinned=\(updated.contains(chatID))")
+    }
+
+    /// Saves a new manual order for the ready videos of one source. Videos that
+    /// are still downloading are cleared so they appear on top once ready.
+    func reorderPlaylist(source: MediaSource, orderedIDs: [UUID]) {
+        var positions: [UUID: Int] = [:]
+        for (position, id) in orderedIDs.enumerated() {
+            positions[id] = position
+        }
+
+        for index in items.indices where items[index].source == source && !items[index].isTrashed {
+            if items[index].status == .ready, let position = positions[items[index].id] {
+                items[index].manualOrder = position
+            } else {
+                items[index].manualOrder = nil
+            }
+        }
+
+        save()
+        AppLog.info("playlist reordered source=\(source.rawValue) count=\(orderedIDs.count)")
     }
 
     var trash: [VideoItem] {
@@ -93,11 +219,24 @@ final class AppStore: ObservableObject {
         }
         let savedConcurrent = defaults.integer(forKey: Self.maxConcurrentDownloadsKey)
         maxConcurrentDownloads = (1...4).contains(savedConcurrent) ? savedConcurrent : 2
+        let savedSegments = defaults.integer(forKey: Self.youtubeSegmentsKey)
+        youtubeSegments = [1, 4, 8].contains(savedSegments) ? savedSegments : 4
+        let savedRate = defaults.double(forKey: Self.playbackRateKey)
+        playbackRate = Self.playbackRateOptions.contains(savedRate) ? savedRate : 1.0
+        if let savedAutoDelete = defaults.object(forKey: Self.autoDeleteYouTubeKey) as? Bool {
+            autoDeleteYouTubeAfterPlayback = savedAutoDelete
+        }
+        if let savedAutoDelete = defaults.object(forKey: Self.autoDeleteTelegramKey) as? Bool {
+            autoDeleteTelegramAfterPlayback = savedAutoDelete
+        }
+        if let pinned = defaults.stringArray(forKey: Self.pinnedTelegramChatsKey) {
+            pinnedTelegramChatIDs = Set(pinned.compactMap(Int64.init))
+        }
 
         load()
 
-        DownloadManager.shared.progressHandler = { [weak self] id, kind, value in
-            self?.receiveProgress(id: id, kind: kind, value: value)
+        DownloadManager.shared.progressHandler = { [weak self] id, kind, value, bytes in
+            self?.receiveProgress(id: id, kind: kind, value: value, bytes: bytes)
         }
         DownloadManager.shared.fileHandler = { [weak self] id, kind in
             self?.receiveFile(id: id, kind: kind)
@@ -108,6 +247,7 @@ final class AppStore: ObservableObject {
 
         purgeExpired(notify: false)
         startHousekeepingTimer()
+        startSpeedTimer()
 
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(1.2))
@@ -118,6 +258,7 @@ final class AppStore: ObservableObject {
 
     deinit {
         housekeepingTimer?.invalidate()
+        speedTimer?.invalidate()
         toastTask?.cancel()
         for task in retryTasks.values {
             task.cancel()
@@ -431,6 +572,14 @@ final class AppStore: ObservableObject {
                 )
                 items.append(item)
                 AppPaths.createDirectory(for: item.id)
+                if let resolution = video.resolution, resolution > 0 {
+                    items[items.count - 1].resolution = resolution
+                }
+                if video.fileSize > 0 {
+                    items[items.count - 1].fileSize = video.fileSize
+                }
+                items[items.count - 1].telegramChatID = video.chatID
+                items[items.count - 1].telegramMessageID = video.postID
                 added += 1
             }
 
@@ -453,6 +602,78 @@ final class AppStore: ObservableObject {
             showToast(text: message, icon: "exclamationmark.triangle.fill")
             return .invalid(message)
         }
+    }
+
+    // MARK: - Telegram browser import
+
+    /// Adds videos picked from the Telegram browser to the library and starts
+    /// downloading them through TDLib.
+    @discardableResult
+    func addTelegramVideos(_ videos: [TelegramFileVideo], chatTitle: String? = nil) -> Int {
+        guard !videos.isEmpty else { return 0 }
+        let baseDate = Date()
+        var added = 0
+        var skipped = 0
+
+        for (index, video) in videos.enumerated() {
+            let mediaURL = "td://\(video.fileID)"
+            if items.contains(where: { $0.videoID == video.itemKey || $0.directMediaURL == mediaURL }) {
+                skipped += 1
+                continue
+            }
+
+            let item = VideoItem(
+                videoID: video.itemKey,
+                sourceURL: video.sourceURL,
+                title: video.title.isEmpty ? "Telegram 视频" : video.title,
+                channel: video.channelTitle,
+                duration: video.duration,
+                addedAt: baseDate.addingTimeInterval(-Double(index)),
+                source: .telegram,
+                directMediaURL: mediaURL,
+                remoteThumbnailURL: nil
+            )
+            items.append(item)
+            AppPaths.createDirectory(for: item.id)
+
+            if let data = video.thumbnailData, !data.isEmpty {
+                try? data.write(to: item.thumbnailFileURL, options: .atomic)
+            }
+            if let resolution = video.resolution, resolution > 0 {
+                items[items.count - 1].resolution = resolution
+            }
+            if video.fileSize > 0 {
+                items[items.count - 1].fileSize = video.fileSize
+            }
+            items[items.count - 1].telegramChatID = video.chatID
+            items[items.count - 1].telegramMessageID = video.postID
+            added += 1
+        }
+
+        guard added > 0 else {
+            if skipped > 0 {
+                showToast(text: "这些视频已经在片库或下载列表里了", icon: "checkmark.circle")
+            }
+            return 0
+        }
+
+        save()
+        pumpDownloadQueue()
+        NotificationService.requestAuthorizationIfNeeded()
+
+        let chatPrefix = chatTitle.map { "「\($0)」的" } ?? ""
+        showToast(text: "已加入\(chatPrefix) \(added) 个视频，开始下载", icon: "arrow.down.circle.fill")
+        AppLog.info("telegram browser added=\(added) skipped=\(skipped) chat=\(chatTitle ?? "-")")
+        return added
+    }
+
+    /// Finds a library item already backed by the same Telegram file.
+    func telegramLibraryItem(for video: TelegramFileVideo) -> VideoItem? {
+        if let byKey = items.first(where: { $0.videoID == video.itemKey }) {
+            return byKey
+        }
+        let mediaURL = "td://\(video.fileID)"
+        return items.first { $0.directMediaURL == mediaURL }
     }
 
     // MARK: - Download queue
@@ -479,6 +700,7 @@ final class AppStore: ObservableObject {
 
         items[index].status = .resolving
         items[index].errorMessage = nil
+        clearSpeed(id: itemID)
         save()
 
         resolveTasks[itemID]?.cancel()
@@ -493,6 +715,8 @@ final class AppStore: ObservableObject {
         downloadsPaused = true
         DownloadManager.shared.suspendAll()
         TelegramSession.shared.pauseAllDownloads()
+        speedSamples.removeAll()
+        downloadSpeeds.removeAll()
         AppLog.info("downloads paused by user")
         showToast(text: "已暂停全部下载", icon: "pause.circle.fill")
     }
@@ -679,16 +903,25 @@ final class AppStore: ObservableObject {
             DownloadManager.shared.start(
                 itemID: itemID,
                 videoURL: media.videoURL,
-                audioURL: media.audioURL
+                audioURL: media.audioURL,
+                segments: youtubeSegments
             )
-            AppLog.info("download started videoID=\(videoID) quality=\(media.qualityLabel)")
-            showToast(text: "开始下载 \(media.qualityLabel)", icon: "arrow.down.circle.fill")
+            AppLog.info("download started videoID=\(videoID) quality=\(media.qualityLabel) segments=\(youtubeSegments)")
+            if let upgradedFrom = media.upgradedFrom {
+                showToast(
+                    text: "所选 \(upgradedFrom)p 不可用，已自动改用 \(media.qualityLabel)",
+                    icon: "arrow.up.circle.fill"
+                )
+            } else {
+                showToast(text: "开始下载 \(media.qualityLabel)", icon: "arrow.down.circle.fill")
+            }
         } catch {
             guard let index = items.firstIndex(where: { $0.id == itemID }) else { return }
             AppLog.error("resolve failed videoID=\(videoID): \(error.localizedDescription)")
             if isPermanentFailure(error) {
                 items[index].status = .failed
                 items[index].errorMessage = error.localizedDescription
+                clearSpeed(id: itemID)
                 save()
                 pumpDownloadQueue()
                 showToast(text: "下载失败：\(error.localizedDescription)", icon: "exclamationmark.triangle.fill")
@@ -742,8 +975,10 @@ final class AppStore: ObservableObject {
         progress[itemID] = 0
         AppPaths.createDirectory(for: itemID)
 
-        DownloadManager.shared.start(itemID: itemID, videoURL: url, audioURL: nil)
-        AppLog.info("telegram download started item=\(itemID) host=\(url.host ?? "nil")")
+        // Test hook: force segmented Range downloads for direct-URL items.
+        let segments = ProcessInfo.processInfo.environment["SHIYING_TEST_SEGMENTS"].flatMap(Int.init) ?? 1
+        DownloadManager.shared.start(itemID: itemID, videoURL: url, audioURL: nil, segments: segments)
+        AppLog.info("telegram download started item=\(itemID) host=\(url.host ?? "nil") segments=\(segments)")
 
         if let thumbnailString = items[index].remoteThumbnailURL,
            let thumbnailURL = URL(string: thumbnailString) {
@@ -763,14 +998,6 @@ final class AppStore: ObservableObject {
     private func beginTDLibDownload(itemID: UUID, fileID: Int) async {
         guard let index = items.firstIndex(where: { $0.id == itemID }), !items[index].isTrashed else { return }
 
-        guard fileID > 0 else {
-            items[index].status = .failed
-            items[index].errorMessage = "Telegram 视频文件标识无效，请重新导入"
-            save()
-            pumpDownloadQueue()
-            return
-        }
-
         TelegramSession.shared.bootstrap()
         let ready = await waitForTelegramReady(timeout: 20)
         guard let current = items.firstIndex(where: { $0.id == itemID }), !items[current].isTrashed else { return }
@@ -782,23 +1009,64 @@ final class AppStore: ObservableObject {
             return
         }
 
-        items[current].status = .downloading
-        items[current].errorMessage = nil
-        items[current].hasSeparateAudio = false
-        items[current].resolution = nil
+        // TDLib reuses file ids once a cached file is deleted, so the id stored
+        // at import time may now point at an unrelated file. Re-resolve it from
+        // the chat/message pair before downloading.
+        var activeFileID = fileID
+        var resolvedSize: Int64 = 0
+        var resolvedHeight: Int?
+        if let locator = telegramLocator(for: items[current]) {
+            do {
+                if let resolved = try await TelegramSession.shared.resolveVideoFileID(
+                    chatID: locator.chatID,
+                    messageID: locator.messageID
+                ) {
+                    activeFileID = resolved.fileID
+                    resolvedSize = resolved.fileSize
+                    if let height = resolved.resolution, height > 0 {
+                        resolvedHeight = height
+                    }
+                }
+            } catch {
+                AppLog.error("tdlib resolve failed item=\(itemID) chat=\(locator.chatID) message=\(locator.messageID): \(error.localizedDescription)")
+            }
+        }
+
+        guard let fresh = items.firstIndex(where: { $0.id == itemID }), !items[fresh].isTrashed else { return }
+
+        guard activeFileID > 0 else {
+            items[fresh].status = .failed
+            items[fresh].errorMessage = "Telegram 视频文件标识无效，请重新导入"
+            save()
+            pumpDownloadQueue()
+            return
+        }
+
+        if items[fresh].directMediaURL != "td://\(activeFileID)" {
+            items[fresh].directMediaURL = "td://\(activeFileID)"
+        }
+        if resolvedSize > 0 {
+            items[fresh].fileSize = resolvedSize
+        }
+
+        let knownResolution = items[fresh].resolution
+        items[fresh].status = .downloading
+        items[fresh].errorMessage = nil
+        items[fresh].hasSeparateAudio = false
+        items[fresh].resolution = resolvedHeight ?? knownResolution
         save()
 
         kindProgress[itemID] = [:]
         progress[itemID] = 0
         AppPaths.createDirectory(for: itemID)
 
-        let destination = items[current].videoFileURL
+        let destination = items[fresh].videoFileURL
         TelegramSession.shared.download(
-            fileID: fileID,
+            fileID: activeFileID,
             itemID: itemID,
             destination: destination,
-            onProgress: { [weak self] value in
-                self?.receiveProgress(id: itemID, kind: "video", value: value)
+            onProgress: { [weak self] value, bytes in
+                self?.receiveProgress(id: itemID, kind: "video", value: value, bytes: bytes)
             },
             onComplete: { [weak self] result in
                 guard let self else { return }
@@ -811,7 +1079,20 @@ final class AppStore: ObservableObject {
                 }
             }
         )
-        AppLog.info("tdlib download started item=\(itemID) fileID=\(fileID)")
+        AppLog.info("tdlib download started item=\(itemID) fileID=\(activeFileID)")
+    }
+
+    /// Recovers the chat/message pair used to re-resolve the TDLib file id.
+    /// Falls back to parsing the legacy `tg:c<chatID>:<messageID>:<index>` key.
+    private func telegramLocator(for item: VideoItem) -> (chatID: Int64, messageID: Int64)? {
+        if let chatID = item.telegramChatID, let messageID = item.telegramMessageID, messageID > 0 {
+            return (chatID, Int64(messageID))
+        }
+        let parts = item.videoID.split(separator: ":")
+        guard parts.count >= 3, parts[0] == "tg", parts[1].hasPrefix("c"),
+              let chatID = Int64(parts[1].dropFirst()),
+              let messageID = Int64(parts[2]), messageID > 0 else { return nil }
+        return (chatID, messageID)
     }
 
     private func waitForTelegramReady(timeout: TimeInterval) async -> Bool {
@@ -850,6 +1131,7 @@ final class AppStore: ObservableObject {
         try? FileManager.default.removeItem(at: items[index].audioFileURL)
         kindProgress[itemID] = nil
         progress[itemID] = nil
+        clearSpeed(id: itemID)
         items[index].status = .queued
         items[index].errorMessage = nil
         items[index].retryCount = 0
@@ -865,6 +1147,7 @@ final class AppStore: ObservableObject {
         guard items[index].status == .retrying else { return }
         items[index].status = .failed
         items[index].errorMessage = "已取消自动重试"
+        clearSpeed(id: itemID)
         save()
         pumpDownloadQueue()
         AppLog.info("auto retry cancelled by user item=\(itemID)")
@@ -896,6 +1179,7 @@ final class AppStore: ObservableObject {
         cancelAutoRetry(itemID: itemID)
         kindProgress[itemID] = nil
         progress[itemID] = nil
+        clearSpeed(id: itemID)
 
         if items[index].retryCount < Self.maxAutoRetries {
             items[index].retryCount += 1
@@ -936,6 +1220,7 @@ final class AppStore: ObservableObject {
         cancelTransfer(itemID: itemID)
         try? FileManager.default.removeItem(at: items[index].videoFileURL)
         try? FileManager.default.removeItem(at: items[index].audioFileURL)
+        clearSpeed(id: itemID)
         items[index].status = .queued
         items[index].errorMessage = nil
         save()
@@ -943,7 +1228,7 @@ final class AppStore: ObservableObject {
         pumpDownloadQueue()
     }
 
-    private func receiveProgress(id: UUID, kind: String, value: Double) {
+    private func receiveProgress(id: UUID, kind: String, value: Double, bytes: Int64) {
         guard let index = items.firstIndex(where: { $0.id == id }), items[index].status == .downloading else { return }
         var values = kindProgress[id] ?? [:]
         values[kind] = min(1, max(0, value))
@@ -952,6 +1237,59 @@ final class AppStore: ObservableObject {
         let expected = items[index].hasSeparateAudio ? 2.0 : 1.0
         let sum = values.values.reduce(0, +)
         progress[id] = min(1, sum / expected)
+        trackSpeed(id: id, kind: kind, bytes: bytes)
+    }
+
+    func downloadSpeedText(for id: UUID) -> String? {
+        downloadSpeeds[id].flatMap { AppPaths.formatSpeed($0) }
+    }
+
+    var totalDownloadSpeedText: String? {
+        AppPaths.formatSpeed(downloadSpeeds.values.reduce(0, +))
+    }
+
+    private func trackSpeed(id: UUID, kind: String, bytes: Int64) {
+        guard !downloadsPaused else { return }
+
+        let now = Date()
+        var samples = speedSamples[id] ?? [:]
+
+        if let last = samples[kind], bytes >= last.bytes {
+            let elapsed = now.timeIntervalSince(last.date)
+            if elapsed >= 0.35 {
+                let instant = Double(bytes - last.bytes) / elapsed
+                let smoothed = last.bytesPerSecond > 0
+                    ? last.bytesPerSecond * 0.6 + instant * 0.4
+                    : instant
+                samples[kind] = SpeedSample(date: now, bytes: bytes, bytesPerSecond: max(0, smoothed))
+            }
+        } else {
+            samples[kind] = SpeedSample(date: now, bytes: bytes, bytesPerSecond: 0)
+        }
+
+        speedSamples[id] = samples
+        refreshSpeed(id: id)
+    }
+
+    private func refreshSpeed(id: UUID) {
+        guard let samples = speedSamples[id] else {
+            downloadSpeeds[id] = nil
+            return
+        }
+        let now = Date()
+        let total = samples.values
+            .filter { now.timeIntervalSince($0.date) < 3 }
+            .reduce(0.0) { $0 + $1.bytesPerSecond }
+        if total > 0 {
+            downloadSpeeds[id] = total
+        } else {
+            downloadSpeeds[id] = nil
+        }
+    }
+
+    private func clearSpeed(id: UUID) {
+        speedSamples[id] = nil
+        downloadSpeeds[id] = nil
     }
 
     private func receiveFile(id: UUID, kind: String) {
@@ -1012,6 +1350,27 @@ final class AppStore: ObservableObject {
             size += Int64(values?.fileSize ?? 0)
         }
 
+        // A stale TDLib file id used to silently download a tiny unrelated
+        // cached file and mark the item ready. Treat a much smaller file as a
+        // failed download so the item can be retried with a fresh id.
+        let expectedSize = item.fileSize
+        if item.directMediaURL?.hasPrefix("td://") == true,
+           expectedSize > 0, size < expectedSize / 2 {
+            try? FileManager.default.removeItem(at: item.videoFileURL)
+            try? FileManager.default.removeItem(at: item.audioFileURL)
+            guard let stale = items.firstIndex(where: { $0.id == itemID }) else { return }
+            items[stale].status = .failed
+            items[stale].errorMessage = "Telegram 下载到的文件不完整，请点按重试"
+            kindProgress[itemID] = nil
+            progress[itemID] = nil
+            clearSpeed(id: itemID)
+            save()
+            AppLog.error("download incomplete title=\(item.title) got=\(size) expected=\(expectedSize)")
+            pumpDownloadQueue()
+            showToast(text: "Telegram 视频下载不完整，请点按重试", icon: "exclamationmark.triangle.fill")
+            return
+        }
+
         var duration = items[index].duration
         let asset = AVURLAsset(url: item.videoFileURL)
         if let loaded = try? await asset.load(.duration), loaded.isNumeric, loaded.seconds.isFinite {
@@ -1031,6 +1390,7 @@ final class AppStore: ObservableObject {
 
         kindProgress[itemID] = nil
         progress[itemID] = nil
+        clearSpeed(id: itemID)
         NotificationService.notifyDownloadFinished(title: title, itemID: itemID)
         pumpDownloadQueue()
         if !trashed {
@@ -1043,8 +1403,17 @@ final class AppStore: ObservableObject {
     func markPlayed(itemID: UUID) {
         guard let index = items.firstIndex(where: { $0.id == itemID }) else { return }
         guard items[index].status == .ready, !items[index].isTrashed else { return }
+
+        let source = items[index].source
         let now = Date()
         items[index].playedAt = now
+
+        guard autoDeletesAfterPlayback(for: source) else {
+            save()
+            AppLog.info("markPlayed kept item=\(itemID) source=\(source.rawValue) autoDelete=false")
+            return
+        }
+
         items[index].isTrashed = true
         items[index].trashedAt = now
         items[index].deleteAfter = Calendar.current.date(byAdding: .day, value: Self.trashRetentionDays, to: now)
@@ -1078,6 +1447,7 @@ final class AppStore: ObservableObject {
         }
         progress[itemID] = nil
         kindProgress[itemID] = nil
+        clearSpeed(id: itemID)
         return true
     }
 
@@ -1118,6 +1488,7 @@ final class AppStore: ObservableObject {
         items.removeAll { $0.id == itemID }
         progress[itemID] = nil
         kindProgress[itemID] = nil
+        clearSpeed(id: itemID)
         return true
     }
 
@@ -1137,6 +1508,7 @@ final class AppStore: ObservableObject {
             AppPaths.removeDirectory(for: item.id)
             progress[item.id] = nil
             kindProgress[item.id] = nil
+            clearSpeed(id: item.id)
         }
         let expiredIDs = Set(expired.map(\.id))
         items.removeAll { expiredIDs.contains($0.id) }
@@ -1353,6 +1725,17 @@ final class AppStore: ObservableObject {
         housekeepingTimer = Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 _ = self?.purgeExpired(notify: false)
+            }
+        }
+    }
+
+    private func startSpeedTimer() {
+        speedTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                for id in Array(self.downloadSpeeds.keys) {
+                    self.refreshSpeed(id: id)
+                }
             }
         }
     }

@@ -8,6 +8,7 @@ struct SourceGroupView: View {
     var onSettings: () -> Void
 
     @State private var confirmDeleteAll = false
+    @State private var showSort = false
 
     private var groupItems: [VideoItem] {
         store.playlist.filter { $0.source == source && $0.status == .ready }
@@ -53,6 +54,9 @@ struct SourceGroupView: View {
         } message: {
             Text("视频文件会立即从手机中删除，无法恢复。")
         }
+        .sheet(isPresented: $showSort) {
+            PlaylistSortView(store: store, source: source)
+        }
     }
 
     private var header: some View {
@@ -74,13 +78,32 @@ struct SourceGroupView: View {
                 Text(groupStats)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Palette.secondary)
-                Text("仅本组连播")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(Palette.tertiary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(Color.white.opacity(0.06)))
-                    .padding(.top, 2)
+                HStack(spacing: 8) {
+                    Text("仅本组连播")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Palette.tertiary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(Color.white.opacity(0.06)))
+
+                    if groupItems.count > 1 {
+                        Button {
+                            showSort = true
+                        } label: {
+                            Label("排序", systemImage: "arrow.up.arrow.down")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(Color(hex: source.accentHex))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(
+                                    Capsule().fill(Color(hex: source.accentHex).opacity(0.12))
+                                )
+                        }
+                        .buttonStyle(ScaleButtonStyle())
+                        .accessibilityLabel("调整播放顺序")
+                    }
+                }
+                .padding(.top, 2)
             }
             Spacer()
 
@@ -113,6 +136,15 @@ struct SourceGroupView: View {
 
                 if !groupItems.isEmpty {
                     Menu {
+                        if groupItems.count > 1 {
+                            Button {
+                                showSort = true
+                            } label: {
+                                Label("调整播放顺序", systemImage: "arrow.up.arrow.down")
+                            }
+
+                            Divider()
+                        }
                         Button {
                             store.moveAllToTrash(in: source)
                         } label: {
@@ -131,7 +163,7 @@ struct SourceGroupView: View {
                             .background(Circle().fill(Color.white.opacity(0.07)))
                             .overlay(Circle().strokeBorder(Palette.line, lineWidth: 1))
                     }
-                    .accessibilityLabel("分组操作：一键删除")
+                    .accessibilityLabel("更多分组操作")
                 }
             }
         }

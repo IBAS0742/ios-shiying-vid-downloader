@@ -56,12 +56,91 @@ struct TelegramFileVideo: Identifiable, Sendable {
     let fileID: Int
     let fileSize: Int64
     let duration: Double
+    var chatID: Int64? = nil
+    var thumbnailData: Data? = nil
+    var resolution: Int? = nil
+    var date: Foundation.Date? = nil
 
     var id: String { itemKey }
 
     var itemKey: String {
-        "tg:\(username.lowercased()):\(postID):\(index)"
+        if !username.isEmpty {
+            return "tg:\(username.lowercased()):\(postID):\(index)"
+        }
+        if let chatID {
+            return "tg:c\(chatID):\(postID):\(index)"
+        }
+        return "tg:\(postID):\(index)"
     }
+
+    var sourceURL: String {
+        if !username.isEmpty {
+            return "https://t.me/\(username)/\(postID)"
+        }
+        if let chatID {
+            return "tg://openmessage?chat_id=\(chatID)&message_id=\(postID)"
+        }
+        return ""
+    }
+}
+
+struct TelegramChatSummary: Identifiable, Sendable, Hashable {
+    enum Kind: Sendable, Hashable {
+        case channel
+        case group
+
+        var label: String {
+            switch self {
+            case .channel: return "频道"
+            case .group: return "群组"
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .channel: return "megaphone.fill"
+            case .group: return "person.2.fill"
+            }
+        }
+    }
+
+    let id: Int64
+    let title: String
+    let kind: Kind
+    let photoData: Data?
+    let unreadCount: Int
+    let lastMessageDate: Foundation.Date?
+    let isArchived: Bool
+
+    init?(
+        chat: Chat,
+        archived: Bool
+    ) {
+        let kind: Kind
+        switch chat.type {
+        case .chatTypeBasicGroup:
+            kind = .group
+        case .chatTypeSupergroup(let info):
+            kind = info.isChannel ? .channel : .group
+        default:
+            return nil
+        }
+
+        id = chat.id
+        title = chat.title
+        self.kind = kind
+        photoData = chat.photo?.minithumbnail?.data
+        unreadCount = max(0, chat.unreadCount)
+        lastMessageDate = chat.lastMessage.map {
+            Foundation.Date(timeIntervalSince1970: TimeInterval($0.date))
+        }
+        isArchived = archived
+    }
+}
+
+struct TelegramVideoPage: Sendable {
+    let videos: [TelegramFileVideo]
+    let nextFromMessageID: Int64?
 }
 
 /// Owns the TDLib client used for QR login and for downloading Telegram videos
@@ -90,6 +169,8 @@ final class TelegramSession: ObservableObject {
     @Published private(set) var passwordHint: String = ""
     @Published private(set) var profileName: String = ""
     @Published private(set) var profileUsername: String = ""
+    @Published private(set) var connectionStateText: String = ""
+    @Published private(set) var downloadDebugText: String = ""
 
     private var manager: TDLibClientManager?
     private var client: TDLibClient?
@@ -98,7 +179,7 @@ final class TelegramSession: ObservableObject {
         let itemID: UUID
         let fileID: Int
         let destination: URL
-        let onProgress: @MainActor (Double) -> Void
+        let onProgress: @MainActor (Double, Int64) -> Void
         let onComplete: @MainActor (Result<Void, Swift.Error>) -> Void
     }
 
@@ -163,8 +244,24 @@ final class TelegramSession: ObservableObject {
             handleAuthState(value.authorizationState)
         case .updateFile(let value):
             handleFile(value.file)
+        case .updateConnectionState(let value):
+            let text = Self.describe(value.state)
+            if connectionStateText != text {
+                AppLog.info("tdlib connection state: \(text)")
+            }
+            connectionStateText = text
         default:
             break
+        }
+    }
+
+    private static func describe(_ state: ConnectionState) -> String {
+        switch state {
+        case .connectionStateReady: return "已连接"
+        case .connectionStateConnecting: return "连接中"
+        case .connectionStateConnectingToProxy: return "连接代理中"
+        case .connectionStateUpdating: return "同步中"
+        case .connectionStateWaitingForNetwork: return "等待网络"
         }
     }
 
@@ -316,7 +413,8 @@ final class TelegramSession: ObservableObject {
                     from: message,
                     username: link.username,
                     channelTitle: channelTitle,
-                    index: index
+                    index: index,
+                    chatID: chat.id
                 ) else { return }
                 guard seen.insert(video.itemKey).inserted else { return }
                 collected.append(video)
@@ -349,15 +447,120 @@ final class TelegramSession: ObservableObject {
         }
     }
 
+    // MARK: - Browsing joined chats
+
+    /// Lists group and channel chats from the user's main and archived lists.
+    func loadChatSummaries(limit: Int = 120) async throws -> [TelegramChatSummary] {
+        guard let client else { throw TelegramSessionError.notReady }
+
+        var summaries: [TelegramChatSummary] = []
+        var seen = Set<Int64>()
+        var firstError: Swift.Error?
+
+        for (list, archived) in [(ChatList.chatListMain, false), (ChatList.chatListArchive, true)] {
+            do {
+                _ = try await client.loadChats(chatList: list, limit: limit)
+            } catch {
+                if !isChatListFullyLoaded(error) {
+                    firstError = firstError ?? error
+                }
+            }
+
+            do {
+                let chats = try await client.getChats(chatList: list, limit: limit)
+                for id in chats.chatIds where seen.insert(id).inserted {
+                    guard let chat = try? await client.getChat(chatId: id),
+                          let summary = TelegramChatSummary(chat: chat, archived: archived) else {
+                        continue
+                    }
+                    summaries.append(summary)
+                }
+            } catch {
+                firstError = firstError ?? error
+            }
+        }
+
+        if summaries.isEmpty, let firstError {
+            throw TelegramSessionError.api("Telegram 群组读取失败：\(friendlyMessage(firstError))")
+        }
+
+        summaries.sort { lhs, rhs in
+            switch (lhs.lastMessageDate, rhs.lastMessageDate) {
+            case let (left?, right?): return left > right
+            case (_?, nil): return true
+            case (nil, _?): return false
+            case (nil, nil): return lhs.title < rhs.title
+            }
+        }
+        AppLog.info("tdlib chats loaded count=\(summaries.count)")
+        return summaries
+    }
+
+    /// Loads a page of video messages from one chat. `fromMessageID` is the
+    /// cursor returned by the previous page; pass 0 for the newest page.
+    func loadChatVideos(
+        chatID: Int64,
+        chatTitle: String,
+        fromMessageID: Int64 = 0,
+        pageSize: Int = 30
+    ) async throws -> TelegramVideoPage {
+        guard let client else { throw TelegramSessionError.notReady }
+
+        do {
+            let history = try await client.getChatHistory(
+                chatId: chatID,
+                fromMessageId: fromMessageID,
+                limit: 100,
+                offset: 0,
+                onlyLocal: false
+            )
+            let messages = history.messages ?? []
+            var videos: [TelegramFileVideo] = []
+            var seen = Set<String>()
+            var oldestMessageID: Int64 = 0
+
+            for message in messages {
+                if oldestMessageID == 0 || message.id < oldestMessageID {
+                    oldestMessageID = message.id
+                }
+                guard videos.count < pageSize else { continue }
+                guard let video = makeVideo(
+                    from: message,
+                    username: "",
+                    channelTitle: chatTitle,
+                    index: 0,
+                    chatID: chatID
+                ) else { continue }
+                guard seen.insert(video.itemKey).inserted else { continue }
+                videos.append(video)
+            }
+
+            // A full page usually means older history exists. The cursor
+            // message appears again on the next page; the caller dedupes it.
+            let next = (messages.count >= 100 && oldestMessageID > 0) ? oldestMessageID : nil
+            AppLog.info("tdlib chat videos chat=\(chatID) loaded=\(videos.count) messages=\(messages.count) next=\(next ?? 0)")
+            return TelegramVideoPage(videos: videos, nextFromMessageID: next)
+        } catch {
+            throw TelegramSessionError.api("Telegram 视频读取失败：\(friendlyMessage(error))")
+        }
+    }
+
+    private func isChatListFullyLoaded(_ error: Swift.Error) -> Bool {
+        (error as? TDLibKit.Error)?.code == 404
+    }
+
     private func makeVideo(
         from message: Message,
         username: String,
         channelTitle: String,
-        index: Int
+        index: Int,
+        chatID: Int64? = nil
     ) -> TelegramFileVideo? {
+        guard message.canBeSaved else { return nil }
         guard case .messageVideo(let content) = message.content else { return nil }
         let video = content.video
         let file = video.video
+        guard file.id > 0 else { return nil }
 
         let caption = content.caption.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let rawTitle = caption.isEmpty ? video.fileName : caption
@@ -373,17 +576,36 @@ final class TelegramSession: ObservableObject {
             title: title,
             fileID: file.id,
             fileSize: max(file.size, file.expectedSize),
-            duration: Double(video.duration)
+            duration: Double(video.duration),
+            chatID: chatID,
+            thumbnailData: video.minithumbnail?.data,
+            resolution: video.height > 0 ? video.height : nil,
+            date: Foundation.Date(timeIntervalSince1970: TimeInterval(message.date))
         )
     }
 
     // MARK: - Downloading files
 
+    /// Re-reads the message and returns its current video file info.
+    /// Persisted file ids are unsafe because TDLib reuses ids once a cached
+    /// file is deleted.
+    func resolveVideoFileID(chatID: Int64, messageID: Int64) async throws -> TelegramFileVideo? {
+        guard let client else { throw TelegramSessionError.notReady }
+        let message = try await client.getMessage(chatId: chatID, messageId: messageID)
+        return makeVideo(
+            from: message,
+            username: "",
+            channelTitle: "",
+            index: 0,
+            chatID: chatID
+        )
+    }
+
     func download(
         fileID: Int,
         itemID: UUID,
         destination: URL,
-        onProgress: @escaping @MainActor (Double) -> Void,
+        onProgress: @escaping @MainActor (Double, Int64) -> Void,
         onComplete: @escaping @MainActor (Result<Void, Swift.Error>) -> Void
     ) {
         guard let client else {
@@ -419,7 +641,35 @@ final class TelegramSession: ObservableObject {
 
     private func handleFile(_ file: File) {
         guard let itemID = fileToItem[file.id] else { return }
+        let total = max(file.expectedSize, file.size)
+        downloadDebugText = "file=\(file.id) \(file.local.downloadedSize)/\(total) active=\(file.local.isDownloadingActive) done=\(file.local.isDownloadingCompleted)"
+        logFileProgress(file, total: total)
         update(job: itemID, file: file)
+    }
+
+    private struct FileProgressLog {
+        let bucket: Int
+        let date: Foundation.Date
+    }
+
+    private var progressLogs: [Int: FileProgressLog] = [:]
+
+    private func logFileProgress(_ file: File, total: Int64) {
+        guard total > 0 else { return }
+        let percent = Int(Double(file.local.downloadedSize) / Double(total) * 100)
+        let bucket = percent / 10 * 10
+        let now = Foundation.Date()
+        if let last = progressLogs[file.id],
+           last.bucket == bucket,
+           now.timeIntervalSince(last.date) < 15 {
+            return
+        }
+        progressLogs[file.id] = FileProgressLog(bucket: bucket, date: now)
+        AppLog.info(
+            "tdlib file \(file.id) \(percent)% "
+                + "(\(file.local.downloadedSize)/\(total)) "
+                + "active=\(file.local.isDownloadingActive)"
+        )
     }
 
     private func update(job itemID: UUID, file: File) {
@@ -433,7 +683,7 @@ final class TelegramSession: ObservableObject {
         let total = max(file.expectedSize, file.size)
         guard total > 0 else { return }
         let value = Double(file.local.downloadedSize) / Double(total)
-        job.onProgress(min(0.99, max(0, value)))
+        job.onProgress(min(0.99, max(0, value)), Int64(file.local.downloadedSize))
     }
 
     private func finish(
@@ -461,7 +711,7 @@ final class TelegramSession: ObservableObject {
                 }
                 try FileManager.default.copyItem(at: source, to: job.destination)
                 await MainActor.run {
-                    job.onProgress(1)
+                    job.onProgress(1, 0)
                     job.onComplete(.success(()))
                     self.deleteCachedFile(job.fileID)
                 }

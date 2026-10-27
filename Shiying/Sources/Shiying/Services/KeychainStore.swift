@@ -1,12 +1,12 @@
 import Foundation
 import Security
 
-/// Minimal keychain wrapper used for the Telegram API credentials.
+/// Minimal keychain wrapper shared by the Telegram and SnapAny credentials.
 enum KeychainStore {
-    private static let service = "com.ibas.shiying.telegram"
+    static let defaultService = "com.ibas.shiying.telegram"
 
-    static func string(for account: String) -> String? {
-        var query = baseQuery(account: account)
+    static func string(for account: String, service: String = defaultService) -> String? {
+        var query = baseQuery(account: account, service: service)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
@@ -18,9 +18,9 @@ enum KeychainStore {
         return String(data: data, encoding: .utf8)
     }
 
-    static func set(_ value: String, for account: String) {
+    static func set(_ value: String, for account: String, service: String = defaultService) {
         guard let data = value.data(using: .utf8) else { return }
-        let query = baseQuery(account: account)
+        let query = baseQuery(account: account, service: service)
         let attributes: [String: Any] = [kSecValueData as String: data]
 
         if SecItemUpdate(query as CFDictionary, attributes as CFDictionary) == errSecItemNotFound {
@@ -31,11 +31,11 @@ enum KeychainStore {
         }
     }
 
-    static func remove(_ account: String) {
-        SecItemDelete(baseQuery(account: account) as CFDictionary)
+    static func remove(_ account: String, service: String = defaultService) {
+        SecItemDelete(baseQuery(account: account, service: service) as CFDictionary)
     }
 
-    private static func baseQuery(account: String) -> [String: Any] {
+    private static func baseQuery(account: String, service: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

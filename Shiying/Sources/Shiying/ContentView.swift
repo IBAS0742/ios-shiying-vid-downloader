@@ -33,10 +33,10 @@ struct RootView: View {
                     .transition(.opacity)
 
                 case .telegram:
-                    SourceGroupView(store: store, source: .telegram) {
-                        showAdd = true
-                    } onPlay: { item in
+                    TelegramHubView(store: store) { item in
                         playback = PlaybackRequest(item: item, queue: store.playbackQueue(for: item))
+                    } onAddLink: {
+                        showAdd = true
                     } onSettings: {
                         showSettings = true
                     }
@@ -104,6 +104,12 @@ struct RootView: View {
                 AppLog.info("set download quality from env: \(quality.rawValue)")
                 store.downloadQuality = quality
             }
+            if let rateRaw = env["SHIYING_SET_RATE"],
+               let rate = Double(rateRaw),
+               AppStore.playbackRateOptions.contains(rate) {
+                AppLog.info("set playback rate from env: \(rate)")
+                store.playbackRate = rate
+            }
             if let raw = env["SHIYING_IMPORT_URL"], !raw.isEmpty {
                 AppLog.info("import url from env: \(raw)")
                 _ = await store.importInput(raw)
@@ -164,11 +170,20 @@ struct RootView: View {
         }
         .onChange(of: scenePhase) { _, newPhase in
             AppLog.info("scene phase: \(String(describing: newPhase))")
-            if newPhase == .active {
+            switch newPhase {
+            case .active:
+                BackgroundDownloadKeeper.shared.stop(reason: "app active")
+                TelegramSession.shared.bootstrap()
                 store.appBecameActive()
                 Task {
                     await store.importFromClipboardIfNeeded()
                 }
+            case .background:
+                BackgroundDownloadKeeper.shared.start { [weak store = store] in
+                    store?.hasActiveDownloadWork ?? false
+                }
+            default:
+                break
             }
         }
         .preferredColorScheme(.dark)

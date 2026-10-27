@@ -111,7 +111,7 @@ struct TelegramLoginView: View {
                 Text(session.profileLabel)
                     .font(.system(size: 13))
                     .foregroundStyle(Palette.secondary)
-                Text("现在可以下载 Telegram 里的大视频了。回到片库重新导入之前的链接即可。")
+                Text("现在可以回到 T 面板，直接浏览已加入的群组和频道。")
                     .font(.system(size: 11))
                     .foregroundStyle(Palette.tertiary)
                     .multilineTextAlignment(.center)

@@ -1,9 +1,11 @@
+import Foundation
 import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var store: AppStore
     @ObservedObject private var telegram = TelegramSession.shared
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var showTelegramLogin = false
     @State private var hasCredentials = TelegramCredentials.isConfigured
@@ -19,9 +21,13 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 22) {
                     header
                     qualitySection
+                    playbackSpeedSection
+                    youtubeSpeedSection
                     concurrencySection
                     sourceSection
+                    playbackCleanupSection
                     telegramSection
+                    diagnosticSection
                     clipboardSection
                     footer
                     Color.clear.frame(height: 30)
@@ -38,7 +44,14 @@ struct SettingsView: View {
             TelegramLoginView(session: telegram)
         }
         .onAppear {
+            hasCredentials = TelegramCredentials.isConfigured
             telegram.bootstrap()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            // Keychain reads can fail while the device is locked, so refresh
+            // the cached credential state once the app is usable again.
+            guard newPhase == .active else { return }
+            hasCredentials = TelegramCredentials.isConfigured
         }
     }
 
@@ -48,7 +61,7 @@ struct SettingsView: View {
                 Text("设置")
                     .font(.system(size: 32, weight: .bold, design: .rounded))
                     .foregroundStyle(Palette.text)
-                Text("下载与剪贴板偏好")
+                Text("下载、播放与剪贴板偏好")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(Palette.secondary)
             }
@@ -84,7 +97,7 @@ struct SettingsView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(Palette.amber)
                     .padding(.top, 1)
-                Text("为保证 iPhone 原生播放和画中画，最高下载 1080p。视频标题里的“4K”只是原标题，不代表实际下载分辨率。")
+                Text("为保证 iPhone 原生播放和画中画，最高下载 1080p。视频标题里的“4K”只是原标题，不代表实际下载分辨率。若所选画质不可用，会自动改用该视频更高的可用画质。")
                     .font(.system(size: 11))
                     .foregroundStyle(Palette.secondary)
                     .lineSpacing(3)
@@ -142,6 +155,94 @@ struct SettingsView: View {
             )
         }
         .buttonStyle(.plain)
+    }
+
+    private var playbackSpeedSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionLabel(title: "播放速度")
+            Text("所有视频默认使用这个倍速播放。在 App 内播放时，长按画面可再临时加速 0.5 倍，松开恢复。")
+                .font(.system(size: 11))
+                .foregroundStyle(Palette.tertiary)
+                .lineSpacing(2)
+
+            LazyVGrid(
+                columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4),
+                spacing: 8
+            ) {
+                ForEach(AppStore.playbackRateOptions, id: \.self) { rate in
+                    playbackRateChip(rate)
+                }
+            }
+        }
+    }
+
+    private func playbackRateChip(_ rate: Double) -> some View {
+        let selected = abs(store.playbackRate - rate) < 0.001
+        return Button {
+            store.playbackRate = rate
+        } label: {
+            Text(playbackRateText(rate))
+                .font(.system(size: 14, weight: .bold, design: .rounded))
+                .foregroundStyle(selected ? Palette.background : Palette.text)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 11)
+                .background(
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .fill(selected ? Palette.amber : Palette.card.opacity(0.8))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                .strokeBorder(selected ? Color.clear : Palette.line, lineWidth: 1)
+                        )
+                )
+        }
+        .buttonStyle(ScaleButtonStyle())
+    }
+
+    private func playbackRateText(_ rate: Double) -> String {
+        String(format: "%g×", rate)
+    }
+
+    private var youtubeSpeedSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionLabel(title: "YouTube 下载加速")
+            Text("分片并发会为同一个视频同时建立多个连接，通常比单连接更快。流量消耗不变；服务器不支持分片时自动回退为单连接。")
+                .font(.system(size: 11))
+                .foregroundStyle(Palette.tertiary)
+                .lineSpacing(2)
+
+            HStack(spacing: 8) {
+                speedChip(value: 1, title: "标准", detail: "单连接")
+                speedChip(value: 4, title: "加速", detail: "4 连接")
+                speedChip(value: 8, title: "极速", detail: "8 连接")
+            }
+        }
+    }
+
+    private func speedChip(value: Int, title: String, detail: String) -> some View {
+        let selected = store.youtubeSegments == value
+        return Button {
+            store.youtubeSegments = value
+        } label: {
+            VStack(spacing: 4) {
+                Text(title)
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                Text(detail)
+                    .font(.system(size: 9, weight: .medium))
+                    .opacity(0.8)
+            }
+            .foregroundStyle(selected ? Palette.background : Palette.text)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .fill(selected ? Palette.amber : Palette.card.opacity(0.8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 15, style: .continuous)
+                            .strokeBorder(selected ? Color.clear : Palette.line, lineWidth: 1)
+                    )
+            )
+        }
+        .buttonStyle(ScaleButtonStyle())
     }
 
     private var concurrencySection: some View {
@@ -256,6 +357,72 @@ struct SettingsView: View {
 
             Spacer(minLength: 0)
         }
+        .padding(14)
+    }
+
+    private var playbackCleanupSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionLabel(title: "播放后自动清理")
+            Text("默认开启。开启后，视频播放时会移入废纸篓，并在 7 天后自动删除；关闭后，之后播放的视频会一直保留在片库中。两个列表互不影响。")
+                .font(.system(size: 11))
+                .foregroundStyle(Palette.tertiary)
+                .lineSpacing(2)
+
+            VStack(spacing: 0) {
+                cleanupToggle(
+                    source: .youtube,
+                    title: "YouTube 列表（Y）",
+                    isOn: $store.autoDeleteYouTubeAfterPlayback
+                )
+
+                Divider()
+                    .overlay(Palette.line)
+                    .padding(.horizontal, 14)
+
+                cleanupToggle(
+                    source: .telegram,
+                    title: "Telegram 列表（T）",
+                    isOn: $store.autoDeleteTelegramAfterPlayback
+                )
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Palette.card.opacity(0.8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(Palette.line, lineWidth: 1)
+                    )
+            )
+        }
+    }
+
+    private func cleanupToggle(
+        source: MediaSource,
+        title: String,
+        isOn: Binding<Bool>
+    ) -> some View {
+        Toggle(isOn: isOn) {
+            HStack(spacing: 12) {
+                Image(systemName: source.icon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color(hex: source.accentHex))
+                    .frame(width: 32, height: 32)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color(hex: source.accentHex).opacity(0.12))
+                    )
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Palette.text)
+                    Text(isOn.wrappedValue ? "播放后自动移入废纸篓" : "播放后保留在片库中")
+                        .font(.system(size: 10))
+                        .foregroundStyle(isOn.wrappedValue ? Palette.tertiary : Palette.mint)
+                }
+            }
+        }
+        .tint(Color(hex: source.accentHex))
         .padding(14)
     }
 
@@ -493,6 +660,67 @@ struct SettingsView: View {
         AppLog.info("telegram api credentials saved")
     }
 
+    private var diagnosticSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionLabel(title: "诊断")
+            Text("日志只记录运行状态，不包含视频内容。遇到问题时可以导出并分享。")
+                .font(.system(size: 11))
+                .foregroundStyle(Palette.tertiary)
+                .lineSpacing(2)
+
+            if let logFileURL {
+                ShareLink(item: logFileURL) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(Palette.amber)
+                            .frame(width: 32, height: 32)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(Palette.amber.opacity(0.12))
+                            )
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("导出运行日志")
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                .foregroundStyle(Palette.text)
+                            Text("shiying.log，最多保留 512 KB")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Palette.tertiary)
+                        }
+
+                        Spacer(minLength: 0)
+                    }
+                    .padding(14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(Palette.card.opacity(0.8))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                    .strokeBorder(Palette.line, lineWidth: 1)
+                            )
+                    )
+                }
+                .buttonStyle(ScaleButtonStyle())
+            } else {
+                Text("暂无日志文件")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Palette.tertiary)
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(Palette.card.opacity(0.8))
+                    )
+            }
+        }
+    }
+
+    private var logFileURL: URL? {
+        let url = URL(fileURLWithPath: AppLog.logPath)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
     private var clipboardSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             SectionLabel(title: "剪贴板")
@@ -540,7 +768,7 @@ struct SettingsView: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: 8) {
             SectionLabel(title: "存储")
-            Text("已下载视频在播放后会进入废纸篓，并在 7 天后自动删除。废纸篓里的视频可以恢复或手动彻底删除。")
+            Text("已下载视频在播放后默认进入废纸篓，并在 7 天后自动删除。可以在「播放后自动清理」里为 Y / T 列表单独关闭。废纸篓里的视频可以恢复或手动彻底删除。")
                 .font(.system(size: 11))
                 .foregroundStyle(Palette.secondary)
                 .lineSpacing(3)

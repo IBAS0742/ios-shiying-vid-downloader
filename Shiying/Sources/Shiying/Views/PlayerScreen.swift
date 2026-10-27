@@ -19,6 +19,8 @@ final class PlayerViewModel: ObservableObject {
     @Published private(set) var timeControlText = "—"
     @Published private(set) var waitingReasonText = "—"
     @Published private(set) var bufferText = "—"
+    @Published private(set) var playbackRate: Float = 1
+    @Published private(set) var isBoosting = false
 
     let playerLayer = AVPlayerLayer()
     let isDebugHUDEnabled = ProcessInfo.processInfo.environment["SHIYING_PLAYER_DEBUG"] == "1"
@@ -36,6 +38,7 @@ final class PlayerViewModel: ObservableObject {
     private var didReportStart = false
     private var didReportFinish = false
     private var fallbackDuration: Double = 0
+    private var baseRate: Float = 1
     private var lastTickLog = Date.distantPast
     private var loadGeneration = 0
     private let seekNearEndOnFirstLoad = ProcessInfo.processInfo.environment["SHIYING_TEST_SEEK_END"] == "1"
@@ -102,6 +105,7 @@ final class PlayerViewModel: ObservableObject {
 
             let playerItem = AVPlayerItem(asset: asset)
             playerItem.preferredForwardBufferDuration = 5
+            playerItem.audioTimePitchAlgorithm = .spectral
 
             guard generation == loadGeneration else {
                 AppLog.info("player load cancelled before player start")
@@ -115,14 +119,16 @@ final class PlayerViewModel: ObservableObject {
                 installItemObservers(on: playerItem)
                 updateNowPlaying(item: item)
                 isLoading = false
+                player.defaultRate = playbackRate
                 player.play()
                 seekNearEndIfRequested(player)
-                AppLog.info("player.play() called after item swap")
+                AppLog.info("player.play() called after item swap rate=\(String(format: "%.2f", playbackRate))")
                 return
             }
 
             let player = AVPlayer(playerItem: playerItem)
             player.automaticallyWaitsToMinimizeStalling = true
+            player.defaultRate = playbackRate
             self.player = player
 
             playerLayer.player = player
@@ -171,6 +177,8 @@ final class PlayerViewModel: ObservableObject {
         errorMessage = nil
         isLoading = true
         isPlaying = false
+        isBoosting = false
+        playbackRate = baseRate
         currentTime = 0
         duration = 0
         videoSizeText = "—"
@@ -205,6 +213,7 @@ final class PlayerViewModel: ObservableObject {
             currentTime = 0
         }
         AppLog.info("player play tapped")
+        player.defaultRate = playbackRate
         player.play()
     }
 
@@ -233,6 +242,38 @@ final class PlayerViewModel: ObservableObject {
             pause()
         } else {
             play()
+        }
+    }
+
+    // MARK: - Speed
+
+    /// Applies the speed configured in global settings. A temporary long-press
+    /// boost is preserved on top of the new base rate.
+    func setBaseRate(_ rate: Double) {
+        baseRate = min(max(Float(rate), 0.5), 4)
+        guard !isBoosting else { return }
+        applyRate(baseRate)
+    }
+
+    /// Long-press boost: add 0.5x until the user releases the screen.
+    func beginBoost() {
+        guard !isBoosting else { return }
+        isBoosting = true
+        applyRate(min(baseRate + 0.5, 4.5))
+    }
+
+    func endBoost() {
+        guard isBoosting else { return }
+        isBoosting = false
+        applyRate(baseRate)
+    }
+
+    private func applyRate(_ rate: Float) {
+        playbackRate = rate
+        guard let player else { return }
+        player.defaultRate = rate
+        if player.timeControlStatus != .paused {
+            player.rate = rate
         }
     }
 
@@ -601,6 +642,8 @@ struct PlayerScreen: View {
     @State private var hideTask: Task<Void, Never>?
     @State private var isScrubbing = false
     @State private var scrubTarget: Double = 0
+    @State private var isPressingVideo = false
+    @State private var boostStartTask: Task<Void, Never>?
 
     init(item: VideoItem, queue: [VideoItem], store: AppStore) {
         self.queue = queue
@@ -626,6 +669,11 @@ struct PlayerScreen: View {
                 .onTapGesture {
                     toggleControls()
                 }
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { _ in handleVideoPressChanged() }
+                        .onEnded { _ in handleVideoPressEnded() }
+                )
 
             if model.isLoading {
                 loadingOverlay
@@ -637,6 +685,11 @@ struct PlayerScreen: View {
 
             controls
 
+            if model.isBoosting {
+                boostHUD
+                    .transition(.opacity.combined(with: .scale(scale: 0.94)))
+            }
+
             if model.isDebugHUDEnabled {
                 debugHUD
             }
@@ -644,12 +697,30 @@ struct PlayerScreen: View {
         .background(Color.black)
         .task {
             AppLog.info("player queue count=\(queue.count) start=\(currentItem.title)")
+            model.setBaseRate(store.playbackRate)
             await startPlayback(currentItem)
+            if let delay = ProcessInfo.processInfo.environment["SHIYING_TEST_BOOST"].flatMap(Double.init) {
+                AppLog.info("test boost scheduled in \(delay)s")
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(delay))
+                    handleVideoPressChanged()
+                    try? await Task.sleep(for: .seconds(1.2))
+                    handleVideoPressEnded()
+                }
+            }
         }
         .onAppear {
             isActive = true
             UIApplication.shared.isIdleTimerDisabled = true
             showControls()
+        }
+        .onChange(of: store.playbackRate) { _, rate in
+            model.setBaseRate(rate)
+        }
+        .onChange(of: model.isPiPActive) { _, active in
+            if active {
+                cancelLongPressBoost()
+            }
         }
         .onChange(of: model.isPlaying) { _, playing in
             if playing {
@@ -662,12 +733,14 @@ struct PlayerScreen: View {
         .onDisappear {
             isActive = false
             hideTask?.cancel()
+            cancelLongPressBoost()
             UIApplication.shared.isIdleTimerDisabled = false
             model.stop()
         }
         .statusBarHidden()
         .persistentSystemOverlays(.hidden)
         .preferredColorScheme(.dark)
+        .animation(.easeInOut(duration: 0.16), value: model.isBoosting)
     }
 
     private var loadingOverlay: some View {
@@ -693,6 +766,25 @@ struct PlayerScreen: View {
                         .strokeBorder(.white.opacity(0.08), lineWidth: 1)
                 )
         )
+    }
+
+    private var boostHUD: some View {
+        VStack {
+            HStack(spacing: 6) {
+                Image(systemName: "forward.fill")
+                    .font(.system(size: 12, weight: .bold))
+                Text("\(rateText(model.playbackRate)) 加速中")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(Capsule().fill(.black.opacity(0.62)))
+            .overlay(Capsule().strokeBorder(.white.opacity(0.16), lineWidth: 1))
+            .padding(.top, 72)
+            Spacer()
+        }
+        .allowsHitTesting(false)
     }
 
     private func errorOverlay(message: String) -> some View {
@@ -965,6 +1057,37 @@ struct PlayerScreen: View {
         } else {
             showControls()
         }
+    }
+
+    private func handleVideoPressChanged() {
+        guard !isPressingVideo else { return }
+        isPressingVideo = true
+        guard model.isPlaying, !model.isPiPActive else { return }
+
+        boostStartTask?.cancel()
+        boostStartTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled, isPressingVideo, !model.isPiPActive else { return }
+            model.beginBoost()
+            AppLog.info("player boost start rate=\(rateText(model.playbackRate))")
+        }
+    }
+
+    private func handleVideoPressEnded() {
+        cancelLongPressBoost()
+    }
+
+    private func cancelLongPressBoost() {
+        isPressingVideo = false
+        boostStartTask?.cancel()
+        boostStartTask = nil
+        guard model.isBoosting else { return }
+        model.endBoost()
+        AppLog.info("player boost end rate=\(rateText(model.playbackRate))")
+    }
+
+    private func rateText(_ rate: Float) -> String {
+        String(format: "%g×", Double(rate))
     }
 
     private func showControls() {

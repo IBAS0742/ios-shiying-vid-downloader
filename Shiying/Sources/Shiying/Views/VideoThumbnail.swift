@@ -109,6 +109,12 @@ struct StatusLine: View {
                             .foregroundStyle(Palette.amber)
                         Text("下载中 \(Int((store.progress[item.id] ?? 0) * 100))%")
                             .foregroundStyle(Palette.amber)
+                        if let speed = store.downloadSpeedText(for: item.id) {
+                            Text("·")
+                                .foregroundStyle(Palette.tertiary)
+                            Text(speed)
+                                .foregroundStyle(Palette.secondary)
+                        }
                     }
                     ProgressView(value: store.progress[item.id] ?? 0)
                         .tint(Palette.amber)

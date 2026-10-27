@@ -81,10 +81,13 @@ struct DownloadsView: View {
             return "已全部暂停"
         }
         let queued = store.queuedCount
-        if queued > 0 {
-            return "同时下载 \(store.maxConcurrentDownloads) 个 · \(queued) 个排队中"
+        var text = queued > 0
+            ? "同时下载 \(store.maxConcurrentDownloads) 个 · \(queued) 个排队中"
+            : "同时最多下载 \(store.maxConcurrentDownloads) 个"
+        if let speed = store.totalDownloadSpeedText {
+            text += " · \(speed)"
         }
-        return "同时最多下载 \(store.maxConcurrentDownloads) 个"
+        return text
     }
 
     private var controls: some View {
