@@ -99,17 +99,14 @@ struct DownloadsView: View {
                     store.pauseAllDownloads()
                 }
             } label: {
-                Label(
-                    store.downloadsPaused ? "全部开始" : "全部暂停",
-                    systemImage: store.downloadsPaused ? "play.fill" : "pause.fill"
-                )
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Palette.background)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 11)
-                .background(Capsule().fill(Palette.amber))
+                Image(systemName: store.downloadsPaused ? "play.fill" : "pause.fill")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(Palette.background)
+                    .frame(width: 44, height: 38)
+                    .background(Capsule().fill(Palette.amber))
             }
             .buttonStyle(ScaleButtonStyle())
+            .accessibilityLabel(store.downloadsPaused ? "全部开始" : "全部暂停")
 
             Menu {
                 ForEach(1...4, id: \.self) { count in
@@ -144,15 +141,15 @@ struct DownloadsView: View {
             Button {
                 confirmDeleteAll = true
             } label: {
-                Label("全部删除", systemImage: "trash.fill")
-                    .font(.system(size: 13, weight: .semibold))
+                Image(systemName: "trash.fill")
+                    .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Palette.coral)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 11)
+                    .frame(width: 44, height: 38)
                     .background(Capsule().fill(Palette.coral.opacity(0.1)))
                     .overlay(Capsule().strokeBorder(Palette.coral.opacity(0.25), lineWidth: 1))
             }
             .buttonStyle(ScaleButtonStyle())
+            .accessibilityLabel("全部删除")
         }
         .padding(12)
         .glassPanel(cornerRadius: 22, fill: Palette.card.opacity(0.7))
