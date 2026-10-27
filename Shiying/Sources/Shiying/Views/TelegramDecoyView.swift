@@ -6,6 +6,7 @@ import SwiftUI
 /// Pulling to refresh returns to the password screen so the real user can
 /// try again without leaving the Telegram tab.
 struct TelegramDecoyView: View {
+    var title: String = "Telegram"
     var onRefresh: () -> Void = {}
 
     @State private var selectedChat: TelegramDecoyChat?
@@ -86,9 +87,11 @@ struct TelegramDecoyView: View {
                             RoundedRectangle(cornerRadius: 11, style: .continuous)
                                 .fill(Color(hex: MediaSource.telegram.accentHex).opacity(0.13))
                         )
-                    Text("Telegram")
+                    Text(title)
                         .font(.system(size: 34, weight: .bold, design: .rounded))
                         .foregroundStyle(Palette.text)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.5)
                 }
 
                 Text("\(TelegramDecoyChat.samples.count) 个群组 · 昨天最后同步")

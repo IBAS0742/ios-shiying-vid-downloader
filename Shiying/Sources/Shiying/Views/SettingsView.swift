@@ -20,6 +20,7 @@ struct SettingsView: View {
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 22) {
                     header
+                    pageTitleSection
                     qualitySection
                     playbackSpeedSection
                     youtubeSpeedSection
@@ -76,6 +77,54 @@ struct SettingsView: View {
                     .background(Circle().fill(Color.white.opacity(0.07)))
             }
             .buttonStyle(ScaleButtonStyle())
+        }
+    }
+
+    private var pageTitleSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionLabel(title: "页面顶部标题")
+            Text("修改后立即生效，仅保存在本机。留空或只输入空白时使用默认标题。")
+                .font(.system(size: 11))
+                .foregroundStyle(Palette.tertiary)
+                .lineSpacing(2)
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("YouTube 标题")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Palette.secondary)
+                    Spacer()
+                    Button("恢复默认") { store.youtubePageTitle = "" }
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Palette.amber)
+                        .accessibilityLabel("恢复 YouTube 默认标题")
+                }
+                TextField("YouTube", text: $store.youtubePageTitle)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.system(size: 14))
+                    .foregroundStyle(Palette.text)
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.cardLift))
+
+                HStack {
+                    Text("Telegram 标题")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Palette.secondary)
+                    Spacer()
+                    Button("恢复默认") { store.telegramPageTitle = "" }
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Palette.amber)
+                        .accessibilityLabel("恢复 Telegram 默认标题")
+                }
+                TextField("Telegram", text: $store.telegramPageTitle)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.system(size: 14))
+                    .foregroundStyle(Palette.text)
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Palette.cardLift))
+            }
         }
     }
 

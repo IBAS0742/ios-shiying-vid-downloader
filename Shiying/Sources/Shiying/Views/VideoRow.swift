@@ -10,6 +10,7 @@ struct VideoRow: View {
     var isSelected: Bool = false
     var onSelect: (() -> Void)? = nil
     var onPlay: () -> Void
+    var allowsContextMenu = true
 
     @State private var confirmDelete = false
     @State private var offsetX: CGFloat = 0
@@ -71,7 +72,7 @@ struct VideoRow: View {
 
             Button(action: handlePrimaryAction) {
                 HStack(alignment: .center, spacing: 12) {
-                    VideoThumbnail(item: item, width: 132)
+                    VideoThumbnail(item: item, width: 132, showsPlayIcon: !inTrash)
 
                     VStack(alignment: .leading, spacing: 6) {
                         Text(item.title)
@@ -140,7 +141,8 @@ struct VideoRow: View {
             requestDelete()
         }
         .contextMenu {
-            if item.status == .ready {
+            if allowsContextMenu {
+            if item.status == .ready && !inTrash {
                 Button {
                     onPlay()
                 } label: {
@@ -184,6 +186,7 @@ struct VideoRow: View {
                 } label: {
                     Label("移到废纸篓", systemImage: "trash")
                 }
+            }
             }
         }
     }
@@ -375,6 +378,7 @@ struct VideoRow: View {
     }
 
     private func primaryAction() {
+        guard !inTrash else { return }
         switch item.status {
         case .ready:
             onPlay()

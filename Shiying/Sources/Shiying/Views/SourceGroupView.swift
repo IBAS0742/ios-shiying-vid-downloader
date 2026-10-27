@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SourceGroupView: View {
     @ObservedObject var store: AppStore
@@ -9,6 +10,8 @@ struct SourceGroupView: View {
 
     @State private var confirmDeleteAll = false
     @State private var showSort = false
+    @State private var draggedID: UUID?
+    @State private var lastDropTargetID: UUID?
 
     private var groupItems: [VideoItem] {
         store.playlist.filter { $0.source == source && $0.status == .ready }
@@ -24,9 +27,21 @@ struct SourceGroupView: View {
                 } else {
                     LazyVStack(spacing: 10) {
                         ForEach(groupItems) { item in
-                            VideoRow(store: store, item: item) {
+                            VideoRow(store: store, item: item, onPlay: {
                                 onPlay(item)
+                            }, allowsContextMenu: false)
+                            .onDrag {
+                                draggedID = item.id
+                                lastDropTargetID = nil
+                                return NSItemProvider(object: item.id.uuidString as NSString)
                             }
+                            .onDrop(of: [UTType.text], delegate: PlaylistDropDelegate(
+                                targetID: item.id,
+                                source: source,
+                                store: store,
+                                draggedID: $draggedID,
+                                lastDropTargetID: $lastDropTargetID
+                            ))
                         }
                     }
                 }
@@ -71,15 +86,17 @@ struct SourceGroupView: View {
                             RoundedRectangle(cornerRadius: 11, style: .continuous)
                                 .fill(Color(hex: source.accentHex).opacity(0.13))
                         )
-                    Text(source.title)
+                    Text(store.pageTitle(for: source))
                         .font(.system(size: 34, weight: .bold, design: .rounded))
                         .foregroundStyle(Palette.text)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.5)
                 }
                 Text(groupStats)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Palette.secondary)
                 HStack(spacing: 8) {
-                    Text("仅本组连播")
+                    Text("仅本组连播 · 长按拖动排序")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(Palette.tertiary)
                         .padding(.horizontal, 8)
@@ -237,5 +254,39 @@ struct SourceGroupView: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(Color.white.opacity(0.035))
         )
+    }
+}
+
+private struct PlaylistDropDelegate: DropDelegate {
+    let targetID: UUID
+    let source: MediaSource
+    let store: AppStore
+    @Binding var draggedID: UUID?
+    @Binding var lastDropTargetID: UUID?
+
+    func validateDrop(info: DropInfo) -> Bool {
+        draggedID != nil
+    }
+
+    func dropEntered(info: DropInfo) {
+        guard let draggedID, lastDropTargetID != targetID else { return }
+        lastDropTargetID = targetID
+        guard draggedID != targetID else { return }
+        var ids = store.playlist.filter { $0.source == source && $0.status == .ready }.map(\.id)
+        guard let from = ids.firstIndex(of: draggedID), let to = ids.firstIndex(of: targetID), from != to else { return }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            ids.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
+            store.reorderPlaylist(source: source, orderedIDs: ids)
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggedID = nil
+        lastDropTargetID = nil
+        return true
     }
 }

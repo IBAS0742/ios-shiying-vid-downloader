@@ -25,6 +25,16 @@ final class AppStore: ObservableObject {
             UserDefaults.standard.set(downloadQuality.rawValue, forKey: Self.downloadQualityKey)
         }
     }
+    @Published var youtubePageTitle: String = "" {
+        didSet {
+            UserDefaults.standard.set(youtubePageTitle, forKey: Self.youtubePageTitleKey)
+        }
+    }
+    @Published var telegramPageTitle: String = "" {
+        didSet {
+            UserDefaults.standard.set(telegramPageTitle, forKey: Self.telegramPageTitleKey)
+        }
+    }
     @Published var autoReadClipboard: Bool = true {
         didSet {
             UserDefaults.standard.set(autoReadClipboard, forKey: Self.autoReadClipboardKey)
@@ -79,6 +89,8 @@ final class AppStore: ObservableObject {
     nonisolated static let retryDelaySeconds = 10
     nonisolated static let playbackRateOptions: [Double] = [0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4]
     private static let downloadQualityKey = "shiying.downloadQuality"
+    private static let youtubePageTitleKey = "shiying.youtubePageTitle"
+    private static let telegramPageTitleKey = "shiying.telegramPageTitle"
     private static let autoReadClipboardKey = "shiying.autoReadClipboard"
     private static let maxConcurrentDownloadsKey = "shiying.maxConcurrentDownloads"
     private static let youtubeSegmentsKey = "shiying.youtubeSegments"
@@ -101,6 +113,19 @@ final class AppStore: ObservableObject {
     private var speedTimer: Timer?
     private var retryTasks: [UUID: Task<Void, Never>] = [:]
     private var resolveTasks: [UUID: Task<Void, Never>] = [:]
+
+    func pageTitle(for source: MediaSource) -> String {
+        let customTitle: String
+        switch source {
+        case .youtube:
+            customTitle = youtubePageTitle
+        case .telegram:
+            customTitle = telegramPageTitle
+        }
+        return customTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? source.title
+            : customTitle
+    }
 
     var playlist: [VideoItem] {
         items.filter { !$0.isTrashed }.sorted(by: Self.playlistOrder)
@@ -145,10 +170,8 @@ final class AppStore: ObservableObject {
         }
     }
 
-    func playbackQueue(for item: VideoItem, inTrash: Bool = false) -> [VideoItem] {
-        let base = inTrash ? trash : playlist
-        let queue = base.filter { $0.source == item.source && $0.status == .ready }
-        return queue.isEmpty ? [item] : queue
+    func playbackQueue(for item: VideoItem) -> [VideoItem] {
+        playlist.filter { $0.source == item.source && $0.isPlayable }
     }
 
     /// Whether watched videos of this source should move to the trash.
@@ -210,6 +233,8 @@ final class AppStore: ObservableObject {
         AppPaths.prepare()
 
         let defaults = UserDefaults.standard
+        youtubePageTitle = defaults.string(forKey: Self.youtubePageTitleKey) ?? ""
+        telegramPageTitle = defaults.string(forKey: Self.telegramPageTitleKey) ?? ""
         if let raw = defaults.string(forKey: Self.downloadQualityKey),
            let savedQuality = DownloadQuality(rawValue: raw) {
             downloadQuality = savedQuality

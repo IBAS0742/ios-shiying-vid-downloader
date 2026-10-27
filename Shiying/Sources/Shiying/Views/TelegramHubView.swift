@@ -1,5 +1,33 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import UIKit
+
+private struct TelegramPlaylistDropDelegate: DropDelegate {
+    let targetID: UUID
+    let store: AppStore
+    @Binding var draggedID: UUID?
+    @Binding var lastDropTargetID: UUID?
+
+    func validateDrop(info: DropInfo) -> Bool { draggedID != nil }
+
+    func dropEntered(info: DropInfo) {
+        guard let draggedID, lastDropTargetID != targetID else { return }
+        lastDropTargetID = targetID
+        guard draggedID != targetID else { return }
+        var ids = store.playlist.filter { $0.source == .telegram && $0.status == .ready }.map(\.id)
+        guard let from = ids.firstIndex(of: draggedID), let to = ids.firstIndex(of: targetID), from != to else { return }
+        ids.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
+        store.reorderPlaylist(source: .telegram, orderedIDs: ids)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggedID = nil
+        lastDropTargetID = nil
+        return true
+    }
+}
 
 struct TelegramHubView: View {
     @ObservedObject var store: AppStore
@@ -19,6 +47,8 @@ struct TelegramHubView: View {
     @State private var selectedChat: TelegramChatSummary?
     @State private var showLogin = false
     @State private var showSort = false
+    @State private var draggedPlaylistID: UUID?
+    @State private var lastDropTargetID: UUID?
 
     @State private var access: TelegramAccessState = TelegramAccessPassword.isSet
         ? TelegramAccessGate.state
@@ -45,7 +75,7 @@ struct TelegramHubView: View {
             if access == .unlocked {
                 realContent
             } else if access == .decoy {
-                TelegramDecoyView(onRefresh: returnToPasswordInput)
+                TelegramDecoyView(title: store.pageTitle(for: .telegram), onRefresh: returnToPasswordInput)
                     .transition(.opacity)
             } else {
                 lockScreen
@@ -124,9 +154,11 @@ struct TelegramHubView: View {
                             RoundedRectangle(cornerRadius: 11, style: .continuous)
                                 .fill(Color(hex: MediaSource.telegram.accentHex).opacity(0.13))
                         )
-                    Text("Telegram")
+                    Text(store.pageTitle(for: .telegram))
                         .font(.system(size: 34, weight: .bold, design: .rounded))
                         .foregroundStyle(Palette.text)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.5)
                 }
 
                 VStack(spacing: 16) {
@@ -425,9 +457,11 @@ struct TelegramHubView: View {
                             RoundedRectangle(cornerRadius: 11, style: .continuous)
                                 .fill(Color(hex: MediaSource.telegram.accentHex).opacity(0.13))
                         )
-                    Text("Telegram")
+                    Text(store.pageTitle(for: .telegram))
                         .font(.system(size: 34, weight: .bold, design: .rounded))
                         .foregroundStyle(Palette.text)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.5)
                 }
 
                 Text(headerSubtitle)
@@ -440,6 +474,20 @@ struct TelegramHubView: View {
             Spacer(minLength: 8)
 
             HStack(spacing: 8) {
+                Button {
+                    clearTransientContent()
+                    returnToPasswordInput()
+                } label: {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(Palette.secondary)
+                        .frame(width: 42, height: 42)
+                        .background(Circle().fill(Color.white.opacity(0.07)))
+                        .overlay(Circle().strokeBorder(Palette.line, lineWidth: 1))
+                }
+                .buttonStyle(ScaleButtonStyle())
+                .accessibilityLabel("锁定 Telegram")
+
                 Button(action: onSettings) {
                     Image(systemName: "gearshape.fill")
                         .font(.system(size: 16, weight: .semibold))
@@ -1026,9 +1074,20 @@ struct TelegramHubView: View {
 
             LazyVStack(spacing: 10) {
                 ForEach(telegramReadyItems) { item in
-                    VideoRow(store: store, item: item) {
+                    VideoRow(store: store, item: item, onPlay: {
                         onPlay(item)
+                    }, allowsContextMenu: false)
+                    .onDrag {
+                        draggedPlaylistID = item.id
+                        lastDropTargetID = nil
+                        return NSItemProvider(object: item.id.uuidString as NSString)
                     }
+                    .onDrop(of: [UTType.text], delegate: TelegramPlaylistDropDelegate(
+                        targetID: item.id,
+                        store: store,
+                        draggedID: $draggedPlaylistID,
+                        lastDropTargetID: $lastDropTargetID
+                    ))
                 }
             }
             .sheet(isPresented: $showSort) {

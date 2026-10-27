@@ -4,6 +4,7 @@ import UIKit
 struct VideoThumbnail: View {
     let item: VideoItem
     var width: CGFloat = 138
+    var showsPlayIcon = true
 
     private var height: CGFloat { width * 9 / 16 }
 
@@ -30,7 +31,7 @@ struct VideoThumbnail: View {
                 endPoint: .bottom
             )
 
-            if item.status == .ready {
+            if item.status == .ready && showsPlayIcon {
                 Image(systemName: "play.fill")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(Palette.text)

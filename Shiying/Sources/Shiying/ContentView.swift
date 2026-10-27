@@ -1,12 +1,6 @@
 import SwiftUI
 import UIKit
 
-private struct PlaybackRequest: Identifiable {
-    let id = UUID()
-    let item: VideoItem
-    let queue: [VideoItem]
-}
-
 struct RootView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.scenePhase) private var scenePhase
@@ -14,7 +8,7 @@ struct RootView: View {
     @State private var tab: AppTab = .youtube
     @State private var showAdd = false
     @State private var showSettings = false
-    @State private var playback: PlaybackRequest?
+    @StateObject private var playback = PlaybackSession()
 
     var body: some View {
         ZStack {
@@ -26,7 +20,7 @@ struct RootView: View {
                     SourceGroupView(store: store, source: .youtube) {
                         showAdd = true
                     } onPlay: { item in
-                        playback = PlaybackRequest(item: item, queue: store.playbackQueue(for: item))
+                        playback.start(item: item, queue: store.playbackQueue(for: item))
                     } onSettings: {
                         showSettings = true
                     }
@@ -34,7 +28,7 @@ struct RootView: View {
 
                 case .telegram:
                     TelegramHubView(store: store) { item in
-                        playback = PlaybackRequest(item: item, queue: store.playbackQueue(for: item))
+                        playback.start(item: item, queue: store.playbackQueue(for: item))
                     } onAddLink: {
                         showAdd = true
                     } onSettings: {
@@ -47,20 +41,24 @@ struct RootView: View {
                         .transition(.opacity)
 
                 case .trash:
-                    TrashView(store: store) { item in
-                        playback = PlaybackRequest(item: item, queue: store.playbackQueue(for: item, inTrash: true))
-                    }
+                    TrashView(store: store)
                     .transition(.opacity)
                 }
             }
             .animation(.easeInOut(duration: 0.2), value: tab)
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            BottomTabBar(
-                selection: $tab,
-                downloadCount: store.downloadsGroup.count,
-                trashCount: store.trash.count
-            )
+            VStack(spacing: 0) {
+                if playback.isMinimized, let item = playback.currentItem {
+                    MiniPlayerBar(session: playback, model: playback.model, item: item)
+                }
+                BottomTabBar(
+                    selection: $tab,
+                    downloadCount: store.downloadsGroup.count,
+                    trashCount: store.trash.count
+                )
+            }
+            .animation(.spring(response: 0.34, dampingFraction: 0.86), value: playback.isMinimized)
         }
         .overlay(alignment: .top) {
             if let toast = store.toast {
@@ -69,15 +67,20 @@ struct RootView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
+        .overlay {
+            if let request = playback.request {
+                PlayerScreen(item: request.item, store: store, session: playback)
+                    .opacity(playback.isMinimized ? 0 : 1)
+                    .allowsHitTesting(!playback.isMinimized)
+                    .transition(.opacity)
+            }
+        }
         .animation(.spring(response: 0.4, dampingFraction: 0.86), value: store.toast?.id)
         .sheet(isPresented: $showAdd) {
             AddLinkView(store: store)
         }
         .sheet(isPresented: $showSettings) {
             SettingsView(store: store)
-        }
-        .fullScreenCover(item: $playback) { request in
-            PlayerScreen(item: request.item, queue: request.queue, store: store)
         }
         .onOpenURL { url in
             AppLog.info("open url: \(url.absoluteString)")
@@ -115,11 +118,11 @@ struct RootView: View {
                 _ = await store.importInput(raw)
             }
             if env["SHIYING_OPEN_FIRST"] == "1",
-               let first = (store.playlist + store.trash).first(where: { $0.isPlayable }) {
+               let first = firstOpenableItem(env: env) {
                 AppLog.info("auto open first item: \(first.title) trashed=\(first.isTrashed) source=\(first.source.rawValue)")
-                playback = PlaybackRequest(
+                playback.start(
                     item: first,
-                    queue: store.playbackQueue(for: first, inTrash: first.isTrashed)
+                    queue: store.playbackQueue(for: first)
                 )
             }
             if env["SHIYING_OPEN_TRASH"] == "1" {
@@ -188,5 +191,12 @@ struct RootView: View {
         }
         .preferredColorScheme(.dark)
         .tint(Palette.amber)
+    }
+
+    private func firstOpenableItem(env: [String: String]) -> VideoItem? {
+        let source = env["SHIYING_OPEN_SOURCE"].flatMap(MediaSource.init(rawValue:))
+        return store.playlist.first {
+            $0.isPlayable && (source == nil || $0.source == source)
+        }
     }
 }

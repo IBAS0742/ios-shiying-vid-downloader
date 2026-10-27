@@ -2,7 +2,6 @@ import SwiftUI
 
 struct TrashView: View {
     @ObservedObject var store: AppStore
-    var onPlay: (VideoItem) -> Void
 
     @State private var selecting = false
     @State private var selectedIDs: Set<UUID> = []
@@ -32,10 +31,10 @@ struct TrashView: View {
                                     inTrash: true,
                                     selectionEnabled: selecting,
                                     isSelected: selectedIDs.contains(item.id),
-                                    onSelect: { toggle(item.id) }
-                                ) {
-                                    onPlay(item)
-                                }
+                                    onSelect: { toggle(item.id) },
+                                    onPlay: {},
+                                    allowsContextMenu: false
+                                )
                             }
                         }
                     }
@@ -228,7 +227,7 @@ struct TrashView: View {
                 Text("默认 7 天后自动删除")
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
                     .foregroundStyle(Palette.text)
-                Text("视频一旦开始播放就会进入废纸篓；删除前仍可播放或恢复。支持批量恢复、批量删除和一键清空。")
+                Text("废纸篓中的视频不支持播放；右滑恢复到片库后可播放，左滑彻底删除。支持批量恢复、批量删除和一键清空。")
                     .font(.system(size: 11))
                     .foregroundStyle(Palette.secondary)
                     .lineSpacing(2)

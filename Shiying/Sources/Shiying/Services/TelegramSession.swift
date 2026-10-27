@@ -174,6 +174,63 @@ final class TelegramSession: ObservableObject {
 
     private var manager: TDLibClientManager?
     private var client: TDLibClient?
+    private var logCleanupTimer: Timer?
+    private var logMaintenanceInFlight = false
+    private static let logCleanupKey = "shiying.tdlib.lastLogCleanup"
+    private static let logFilenameKey = "shiying.tdlib.currentLogFilename"
+
+    private var detailedLogURL: URL {
+        let name = UserDefaults.standard.string(forKey: Self.logFilenameKey) ?? "tdlib.log"
+        return AppPaths.root.appendingPathComponent(Self.isDetailedLogFilename(name) ? name : "tdlib.log")
+    }
+
+    nonisolated private static func isDetailedLogFilename(_ name: String) -> Bool {
+        name.range(of: #"^tdlib(?:-[A-Za-z0-9-]+)?\.log(?:\.old)?$"#, options: .regularExpression) != nil
+    }
+
+    private func maintainDetailedLog() {
+        guard let client, !logMaintenanceInFlight else { return }
+        logMaintenanceInFlight = true
+        Task {
+            defer { self.logMaintenanceInFlight = false }
+            let now = Foundation.Date()
+            let last = UserDefaults.standard.object(forKey: Self.logCleanupKey) as? Foundation.Date ?? .distantPast
+            let cleanupDue = now.timeIntervalSince(last) >= 3600
+            let logURL = cleanupDue
+                ? AppPaths.root.appendingPathComponent("tdlib-\(Int(now.timeIntervalSince1970))-\(UUID().uuidString).log")
+                : self.detailedLogURL
+            do {
+                _ = try await client.setLogVerbosityLevel(newVerbosityLevel: 1)
+                _ = try await client.setLogStream(logStream: .logStreamFile(LogStreamFile(
+                    maxFileSize: 2 * 1024 * 1024,
+                    path: logURL.path,
+                    redirectStderr: false
+                )))
+                UserDefaults.standard.set(logURL.lastPathComponent, forKey: Self.logFilenameKey)
+                guard cleanupDue else { return }
+                let directory = AppPaths.root
+                try await Task.detached(priority: .utility) {
+                    let fileManager = FileManager.default
+                    let files = try fileManager.contentsOfDirectory(
+                        at: directory,
+                        includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+                    )
+                    for file in files {
+                        let name = file.lastPathComponent
+                        guard Self.isDetailedLogFilename(name),
+                              name != logURL.lastPathComponent,
+                              name != logURL.lastPathComponent + ".old" else { continue }
+                        let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                        guard values.isRegularFile == true, values.isSymbolicLink != true else { continue }
+                        try fileManager.removeItem(at: file)
+                    }
+                }.value
+                UserDefaults.standard.set(now, forKey: Self.logCleanupKey)
+            } catch {
+                AppLog.error("tdlib log maintenance failed: \(error.localizedDescription)")
+            }
+        }
+    }
 
     private struct DownloadJob {
         let itemID: UUID
@@ -204,7 +261,10 @@ final class TelegramSession: ObservableObject {
             phase = .unconfigured
             return
         }
-        guard manager == nil else { return }
+        guard manager == nil else {
+            maintainDetailedLog()
+            return
+        }
 
         prepareDirectories()
         phase = .starting
@@ -219,6 +279,16 @@ final class TelegramSession: ObservableObject {
             }
         }
         self.client = client
+        maintainDetailedLog()
+        logCleanupTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                let last = UserDefaults.standard.object(forKey: Self.logCleanupKey) as? Foundation.Date ?? .distantPast
+                if Foundation.Date().timeIntervalSince(last) >= 3600 {
+                    self.maintainDetailedLog()
+                }
+            }
+        }
         AppLog.info("tdlib client created")
     }
 
@@ -298,6 +368,8 @@ final class TelegramSession: ObservableObject {
 
         case .authorizationStateClosed:
             failAllDownloads(TelegramSessionError.api("Telegram 会话已关闭"))
+            logCleanupTimer?.invalidate()
+            logCleanupTimer = nil
             client = nil
             manager = nil
             qrLink = nil

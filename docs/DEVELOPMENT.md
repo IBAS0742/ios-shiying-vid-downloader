@@ -489,6 +489,14 @@ LinkExtractor / YouTubeLink / TelegramLink
 - 长按加速：在当前基准速率上临时 +0.5，松手恢复；
 - 播放开始后由 `AppStore.markPlayed` 决定是否进入废纸篓（按来源的自动清理开关）。
 
+播放器不再用 `fullScreenCover`，而是由 `RootView` 持有的 `PlaybackSession` 管理：
+
+- `PlaybackSession.model` 是唯一的 `PlayerViewModel`，`PlayerScreen` 和底部 `MiniPlayerBar` 共用它，所以最小化不会销毁播放器；
+- 最小化时 `PlayerScreen` 仍然挂在视图树里（`opacity 0` + 禁止点击），自动连播、进度回调继续工作；
+- 只有 `close()` 才会把 `request` 置空并 `stop()`；`minimize()` 只改变 `isMinimized`；
+- 迷你播放条放在 `safeAreaInset` 里、`BottomTabBar` 上方，因此各页面会自然让出高度；
+- 横竖屏由 `OrientationController` + `AppDelegate.application(_:supportedInterfaceOrientationsFor:)` 控制：默认锁竖屏，只有播放页允许横屏；旋转按钮调用 `requestGeometryUpdate`。
+
 ### 6.5 Telegram
 
 - 公开网页预览：`TelegramService` 解析 HTML，拿到直链后走 `DownloadManager`；
@@ -513,7 +521,11 @@ LinkExtractor / YouTubeLink / TelegramLink
   > 漏掉第 3 步会让旧 `library.json` 整体解码失败，用户会看到空片库——这是最危险的数据事故之一。
 - 手势：行内左滑删除使用 `simultaneousGesture` + 轴锁；不要在父视图再加会抢占点击判定的 `onTapGesture`，否则会出现“滑不动 / 松手跳一下”。
 
-### 6.7 预留但未接入的代码
+### 6.7 页面标题与展示偏好
+
+`AppStore.youtubePageTitle` 与 `AppStore.telegramPageTitle` 使用 `UserDefaults` 保存本机自定义标题。空白值回退到 `MediaSource.title`；页面标题只影响展示，不改变来源、播放队列或数据结构。
+
+### 6.8 预留但未接入的代码
 
 `Services/SnapAnyService.swift` 预留了 SnapAny 的 YouTube 代理下载 API（Keychain service `com.ibas.shiying.snapany`），适合手机无法直连 `googlevideo` 时使用。**当前没有任何调用点，设置里也没有入口**，不要误以为它是已启用功能。若要接入：
 
@@ -559,7 +571,8 @@ $PMD3 developer dvt launch "$BUNDLE" --kill-existing --env KEY=VALUE
 | `SHIYING_OPEN_SETTINGS` | `1` | 350ms 后打开设置 sheet |
 | `SHIYING_OPEN_ADD` | `1` | 350ms 后打开添加链接 sheet |
 | `SHIYING_OPEN_FIRST` | `1` | 自动打开片库/废纸篓中第一条可播放视频 |
-| `SHIYING_KEEP_AWAKE` | `1` | 关闭系统自动锁屏 |
+| `SHIYING_OPEN_SOURCE` | `youtube` / `telegram` | 与 `OPEN_FIRST` 搭配，只在该来源里挑第一条 |
+| `SHIYING_KEEP_AWAKE` | `1` | 关闭系统自动锁屏；最小化后也强制保持屏幕常亮，便于截图验证 |
 | `SHIYING_SKIP_CLIPBOARD` | `1` | 跳过启动时的剪贴板导入 |
 | `SHIYING_SET_QUALITY` | `best` / `p1080` / `p720` / `p480` / `p360` | 覆盖下载画质 |
 | `SHIYING_SET_RATE` | `0.5` … `4` | 覆盖全局播放速度（必须是允许值） |
@@ -586,6 +599,9 @@ $PMD3 developer dvt launch "$BUNDLE" --kill-existing --env KEY=VALUE
 | `SHIYING_TEST_SEEK_END` | `1` | 首次加载后跳到接近结尾，测试连播/自动清理 |
 | `SHIYING_TEST_PIP` | `1` | 画中画可用时自动进入 PiP |
 | `SHIYING_TEST_BOOST` | 秒数 | 延时后自动触发长按加速 |
+| `SHIYING_TEST_MINIMIZE` | 秒数 | 延时后自动最小化为底部播放条 |
+| `SHIYING_TEST_LANDSCAPE` | `1` | 打开播放页 1.2 秒后自动切到横屏 |
+| `SHIYING_TEST_PAUSE` | 秒数 | 延时后自动暂停/继续，用于验证迷你条暂停态 |
 
 ### 破坏性（先备份！）
 

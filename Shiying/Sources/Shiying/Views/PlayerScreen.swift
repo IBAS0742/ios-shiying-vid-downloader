@@ -45,6 +45,9 @@ final class PlayerViewModel: ObservableObject {
     private var didSeekNearEnd = false
     private let startPiPOnPossible = ProcessInfo.processInfo.environment["SHIYING_TEST_PIP"] == "1"
     private var didAutoStartPiP = false
+    private var seekGeneration = 0
+    private var pendingSeekTarget: Double?
+    private weak var observedItem: AVPlayerItem?
 
     var debugSummary: String {
         let time = String(format: "%.2f", currentTime)
@@ -60,13 +63,15 @@ final class PlayerViewModel: ObservableObject {
     }
 
     func load(item: VideoItem, onStarted: @escaping () -> Void, onFinished: @escaping () -> Void) async {
-        loadGeneration += 1
+        invalidatePendingLoad()
         let generation = loadGeneration
         startedHandler = onStarted
         finishedHandler = onFinished
         didReportStart = false
         didReportFinish = false
         fallbackDuration = item.duration
+        currentTime = 0
+        duration = item.duration
         isLoading = true
         errorMessage = nil
 
@@ -94,6 +99,7 @@ final class PlayerViewModel: ObservableObject {
                 AppLog.info("player video track size=\(Int(size.width))x\(Int(size.height)) transform=\(transform)")
             }
 
+            guard generation == loadGeneration else { return }
             guard !videoTracks.isEmpty else {
                 throw PlaybackError.noVideoTrack
             }
@@ -157,9 +163,16 @@ final class PlayerViewModel: ObservableObject {
         }
     }
 
+    func invalidatePendingLoad() {
+        loadGeneration += 1
+        seekGeneration += 1
+        pendingSeekTarget = nil
+        observedItem = nil
+    }
+
     func stop() {
         AppLog.info("player stop")
-        loadGeneration += 1
+        invalidatePendingLoad()
         teardownPlayer()
         startedHandler = nil
         finishedHandler = nil
@@ -169,6 +182,7 @@ final class PlayerViewModel: ObservableObject {
     }
 
     func prepareForNextItem() {
+        invalidatePendingLoad()
         AppLog.info("player prepare for next item")
         removeItemObservers()
         player?.pause()
@@ -278,23 +292,35 @@ final class PlayerViewModel: ObservableObject {
     }
 
     func skip(by seconds: Double) {
-        guard let player else { return }
-        let target = min(max(currentTime + seconds, 0), max(duration, 0))
-        AppLog.info("player skip to \(String(format: "%.1f", target))")
-        player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
-                    toleranceBefore: .zero,
-                    toleranceAfter: .zero)
-        currentTime = target
+        seek(to: currentTime + seconds)
     }
 
     func seek(to seconds: Double) {
-        guard let player else { return }
+        guard let player, let item = observedItem,
+              player.currentItem === item, !isLoading else { return }
         let target = min(max(seconds, 0), max(duration, 0))
+        seekGeneration += 1
+        let generation = seekGeneration
+        pendingSeekTarget = target
+        currentTime = target
         AppLog.info("player seek to \(String(format: "%.1f", target))")
         player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
                     toleranceBefore: .zero,
-                    toleranceAfter: .zero)
-        currentTime = target
+                    toleranceAfter: .zero) { [weak self, weak player, weak item] finished in
+            Task { @MainActor in
+                guard let self, let player, let item,
+                      self.seekGeneration == generation,
+                      self.player === player, self.observedItem === item,
+                      player.currentItem === item else { return }
+                self.pendingSeekTarget = nil
+                let actualTime = item.currentTime().seconds
+                if finished {
+                    self.currentTime = target
+                } else if actualTime.isFinite {
+                    self.currentTime = max(0, actualTime)
+                }
+            }
+        }
     }
 
     func togglePiP() {
@@ -316,10 +342,10 @@ final class PlayerViewModel: ObservableObject {
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.5, preferredTimescale: 600),
             queue: .main
-        ) { [weak self, weak player] time in
+        ) { [weak self, weak player] _ in
             guard let self, let player else { return }
             MainActor.assumeIsolated {
-                self.handleTick(time: time, player: player)
+                self.handleTick(player: player)
             }
         }
 
@@ -333,6 +359,7 @@ final class PlayerViewModel: ObservableObject {
     }
 
     private func removeItemObservers() {
+        observedItem = nil
         itemStatusObservation?.invalidate()
         itemStatusObservation = nil
         notificationObservers.forEach { NotificationCenter.default.removeObserver($0) }
@@ -341,12 +368,15 @@ final class PlayerViewModel: ObservableObject {
 
     private func installItemObservers(on playerItem: AVPlayerItem) {
         removeItemObservers()
+        observedItem = playerItem
+        let generation = loadGeneration
 
         itemStatusObservation = playerItem.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
             let status = item.status.rawValue
             let errorText = item.error?.localizedDescription
             Task { @MainActor in
-                self?.handleItemStatus(status: status, errorText: errorText)
+                guard let self, self.loadGeneration == generation else { return }
+                self.handleItemStatus(status: status, errorText: errorText)
             }
         }
 
@@ -359,7 +389,8 @@ final class PlayerViewModel: ObservableObject {
             let text = error?.localizedDescription ?? "unknown"
             AppLog.error("player item failed to end: \(text)")
             Task { @MainActor in
-                self?.errorMessage = text
+                guard let self, self.loadGeneration == generation else { return }
+                self.errorMessage = text
             }
         })
 
@@ -380,6 +411,7 @@ final class PlayerViewModel: ObservableObject {
         ) { [weak self] _ in
             guard let self else { return }
             MainActor.assumeIsolated {
+                guard self.loadGeneration == generation else { return }
                 AppLog.info("player reached end")
                 self.isPlaying = false
                 guard !self.didReportFinish else { return }
@@ -501,9 +533,12 @@ final class PlayerViewModel: ObservableObject {
         AppLog.info("player timeControl=\(timeControlText) reason=\(waitingReasonText) rate=\(String(format: "%.2f", player?.rate ?? 0))")
     }
 
-    private func handleTick(time: CMTime, player: AVPlayer) {
-        let seconds = time.seconds
-        if seconds.isFinite {
+    private func handleTick(player: AVPlayer) {
+        guard self.player === player, !isLoading,
+              let item = observedItem, player.currentItem === item else { return }
+        // The periodic callback's time can belong to the item replaced on this player.
+        let seconds = item.currentTime().seconds
+        if seconds.isFinite, pendingSeekTarget == nil {
             currentTime = max(0, seconds)
         }
 
@@ -630,10 +665,9 @@ struct PlayerSurfaceView: UIViewRepresentable {
 }
 
 struct PlayerScreen: View {
-    let queue: [VideoItem]
     @ObservedObject var store: AppStore
-    @Environment(\.dismiss) private var dismiss
-    @StateObject private var model = PlayerViewModel()
+    @ObservedObject var session: PlaybackSession
+    @ObservedObject private var model: PlayerViewModel
 
     @State private var currentItem: VideoItem
     @State private var isAdvancing = false
@@ -645,10 +679,15 @@ struct PlayerScreen: View {
     @State private var isPressingVideo = false
     @State private var boostStartTask: Task<Void, Never>?
 
-    init(item: VideoItem, queue: [VideoItem], store: AppStore) {
-        self.queue = queue
+    init(item: VideoItem, store: AppStore, session: PlaybackSession) {
         self.store = store
+        self.session = session
+        self._model = ObservedObject(wrappedValue: session.model)
         _currentItem = State(initialValue: item)
+    }
+
+    private var queue: [VideoItem] {
+        session.request?.queue ?? []
     }
 
     private var displayItem: VideoItem {
@@ -708,14 +747,52 @@ struct PlayerScreen: View {
                     handleVideoPressEnded()
                 }
             }
+            if let delay = ProcessInfo.processInfo.environment["SHIYING_TEST_MINIMIZE"].flatMap(Double.init) {
+                AppLog.info("test minimize scheduled in \(delay)s")
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(delay))
+                    guard isActive else { return }
+                    session.minimize()
+                }
+            }
+            if ProcessInfo.processInfo.environment["SHIYING_TEST_LANDSCAPE"] == "1" {
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(1200))
+                    guard isActive else { return }
+                    AppLog.info("test switch to landscape")
+                    toggleOrientation()
+                }
+            }
+            if let delay = ProcessInfo.processInfo.environment["SHIYING_TEST_PAUSE"].flatMap(Double.init) {
+                AppLog.info("test pause scheduled in \(delay)s")
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(delay))
+                    guard isActive else { return }
+                    model.togglePlayPause()
+                }
+            }
         }
         .onAppear {
             isActive = true
-            UIApplication.shared.isIdleTimerDisabled = true
+            updateIdleTimer(minimized: session.isMinimized)
             showControls()
         }
         .onChange(of: store.playbackRate) { _, rate in
             model.setBaseRate(rate)
+        }
+        .onChange(of: session.isMinimized) { _, minimized in
+            updateIdleTimer(minimized: minimized)
+            if !minimized {
+                showControls()
+            }
+        }
+        .onChange(of: session.request?.id) { _, _ in
+            guard let request = session.request else { return }
+            currentItem = request.item
+            isAdvancing = false
+            model.prepareForNextItem()
+            showControls()
+            Task { await startPlayback(request.item) }
         }
         .onChange(of: model.isPiPActive) { _, active in
             if active {
@@ -737,8 +814,8 @@ struct PlayerScreen: View {
             UIApplication.shared.isIdleTimerDisabled = false
             model.stop()
         }
-        .statusBarHidden()
-        .persistentSystemOverlays(.hidden)
+        .statusBarHidden(!session.isMinimized)
+        .persistentSystemOverlays(session.isMinimized ? .automatic : .hidden)
         .preferredColorScheme(.dark)
         .animation(.easeInOut(duration: 0.16), value: model.isBoosting)
     }
@@ -799,7 +876,7 @@ struct PlayerScreen: View {
                 .font(.system(size: 12))
                 .foregroundStyle(.white.opacity(0.65))
                 .multilineTextAlignment(.center)
-            Button("关闭") { dismiss() }
+            Button("关闭") { session.close() }
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Palette.background)
                 .padding(.horizontal, 24)
@@ -848,16 +925,18 @@ struct PlayerScreen: View {
         HStack(alignment: .center, spacing: 12) {
             Button {
                 hideTask?.cancel()
-                dismiss()
+                AppLog.info("player minimized")
+                session.minimize()
             } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 13, weight: .bold))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(.white)
                     .frame(width: 36, height: 36)
                     .background(Circle().fill(.black.opacity(0.45)))
                     .overlay(Circle().strokeBorder(.white.opacity(0.18), lineWidth: 1))
             }
             .buttonStyle(ScaleButtonStyle())
+            .accessibilityLabel("最小化播放")
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(displayItem.title)
@@ -870,6 +949,19 @@ struct PlayerScreen: View {
             }
 
             Spacer(minLength: 8)
+
+            Button {
+                toggleOrientation()
+            } label: {
+                Image(systemName: "rotate.right")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(Circle().fill(.black.opacity(0.45)))
+                    .overlay(Circle().strokeBorder(.white.opacity(0.18), lineWidth: 1))
+            }
+            .buttonStyle(ScaleButtonStyle())
+            .accessibilityLabel("切换横屏")
 
             Button {
                 model.togglePiP()
@@ -907,14 +999,15 @@ struct PlayerScreen: View {
 
                 Slider(
                     value: Binding(
-                        get: { isScrubbing ? scrubTarget : model.currentTime },
-                        set: { scrubTarget = $0 }
+                        get: { min(max(isScrubbing ? scrubTarget : model.currentTime, 0), max(model.duration, 1)) },
+                        set: {
+                            isScrubbing = true
+                            scrubTarget = $0
+                        }
                     ),
                     in: 0...max(model.duration, 1),
                     onEditingChanged: { editing in
                         if editing {
-                            isScrubbing = true
-                            scrubTarget = model.currentTime
                             hideTask?.cancel()
                         } else {
                             isScrubbing = false
@@ -1022,6 +1115,7 @@ struct PlayerScreen: View {
         AppLog.info("autoplay next id=\(next.id) title=\(next.title)")
         isAdvancing = true
         currentItem = next
+        session.updateCurrentItem(next)
         model.prepareForNextItem()
         showControls()
         Task {
@@ -1033,7 +1127,7 @@ struct PlayerScreen: View {
     private var nextPlayableItem: VideoItem? {
         let currentID = currentItem.id
         guard let index = queue.firstIndex(where: { $0.id == currentID }) else {
-            return queue.first(where: { $0.id != currentID && playableItem(for: $0) != nil })
+            return nil
         }
         for candidate in queue.dropFirst(index + 1) {
             if let playable = playableItem(for: candidate) {
@@ -1045,9 +1139,9 @@ struct PlayerScreen: View {
 
     private func playableItem(for candidate: VideoItem) -> VideoItem? {
         if let fresh = store.items.first(where: { $0.id == candidate.id }) {
-            return fresh.isPlayable ? fresh : nil
+            return fresh.isPlayable && !fresh.isTrashed && fresh.source == currentItem.source ? fresh : nil
         }
-        return candidate.isPlayable ? candidate : nil
+        return nil
     }
 
     private func toggleControls() {
@@ -1057,6 +1151,16 @@ struct PlayerScreen: View {
         } else {
             showControls()
         }
+    }
+
+    private func toggleOrientation() {
+        OrientationController.shared.toggle()
+        showControls()
+    }
+
+    private func updateIdleTimer(minimized: Bool) {
+        let forced = ProcessInfo.processInfo.environment["SHIYING_KEEP_AWAKE"] == "1"
+        UIApplication.shared.isIdleTimerDisabled = forced || !minimized
     }
 
     private func handleVideoPressChanged() {
