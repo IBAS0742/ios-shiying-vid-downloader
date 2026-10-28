@@ -14,13 +14,23 @@ final class PlaybackSession: ObservableObject {
     @Published private(set) var request: Request?
     @Published private(set) var currentItem: VideoItem?
     @Published private(set) var isMinimized = false
+    private static let savedItemKey = "shiying.playback.savedItem"
 
     func start(item: VideoItem, queue: [VideoItem]) {
         guard !item.isTrashed, item.isPlayable else { return }
         request = Request(item: item, queue: queue.filter { $0.source == item.source && !$0.isTrashed && $0.isPlayable })
         currentItem = item
+        UserDefaults.standard.set(item.id.uuidString, forKey: Self.savedItemKey)
         isMinimized = false
         OrientationController.shared.allowRotation()
+    }
+
+    func startNext(item: VideoItem, queue: [VideoItem]) {
+        let wasMinimized = isMinimized
+        start(item: item, queue: queue)
+        if wasMinimized {
+            minimize()
+        }
     }
 
     func updateCurrentItem(_ item: VideoItem) {
@@ -40,10 +50,20 @@ final class PlaybackSession: ObservableObject {
         OrientationController.shared.allowRotation()
     }
 
+    func playNext(using store: AppStore) {
+        guard let request, let currentItem,
+              let index = request.queue.firstIndex(where: { $0.id == currentItem.id }),
+              index + 1 < request.queue.count else { return }
+        let next = request.queue[index + 1]
+        store.movePlayedToTrash(itemID: currentItem.id)
+        startNext(item: next, queue: request.queue)
+    }
+
     func close() {
         guard request != nil else { return }
         request = nil
         currentItem = nil
+        UserDefaults.standard.removeObject(forKey: Self.savedItemKey)
         isMinimized = false
         model.stop()
         OrientationController.shared.lockPortrait()

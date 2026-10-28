@@ -1397,8 +1397,8 @@ final class AppStore: ObservableObject {
         }
 
         var duration = items[index].duration
-        let asset = AVURLAsset(url: item.videoFileURL)
-        if let loaded = try? await asset.load(.duration), loaded.isNumeric, loaded.seconds.isFinite {
+        if let asset = try? await PlaybackAssetBuilder.makeAsset(for: item),
+           let loaded = try? await asset.load(.duration), loaded.isNumeric, loaded.seconds.isFinite, loaded.seconds > 0 {
             duration = loaded.seconds
         }
 
@@ -1428,23 +1428,25 @@ final class AppStore: ObservableObject {
     func markPlayed(itemID: UUID) {
         guard let index = items.firstIndex(where: { $0.id == itemID }) else { return }
         guard items[index].status == .ready, !items[index].isTrashed else { return }
+        items[index].playedAt = Date()
+        save()
+    }
 
-        let source = items[index].source
+    func savePlaybackPosition(itemID: UUID, position: Double) {
+        guard let index = items.firstIndex(where: { $0.id == itemID }), position.isFinite else { return }
+        items[index].playbackPosition = max(0, position)
+        save()
+    }
+
+    func movePlayedToTrash(itemID: UUID) {
+        guard let index = items.firstIndex(where: { $0.id == itemID }), !items[index].isTrashed else { return }
         let now = Date()
         items[index].playedAt = now
-
-        guard autoDeletesAfterPlayback(for: source) else {
-            save()
-            AppLog.info("markPlayed kept item=\(itemID) source=\(source.rawValue) autoDelete=false")
-            return
-        }
-
         items[index].isTrashed = true
         items[index].trashedAt = now
         items[index].deleteAfter = Calendar.current.date(byAdding: .day, value: Self.trashRetentionDays, to: now)
         save()
-        AppLog.info("markPlayed item=\(itemID) title=\(items[index].title) deleteAfter=\(items[index].deleteAfter?.description ?? "nil")")
-        showToast(text: "已看过的视频会在 7 天后自动清理", icon: "clock.arrow.circlepath")
+        showToast(text: "已移到废纸篓，7 天后自动清理", icon: "clock.arrow.circlepath")
     }
 
     func moveToTrash(itemID: UUID) {

@@ -27,6 +27,7 @@ struct VideoItem: Identifiable, Codable, Equatable {
     var fileSize: Int64
     var isTrashed: Bool
     var playedAt: Date?
+    var playbackPosition: Double
     var trashedAt: Date?
     var deleteAfter: Date?
     var retryCount: Int
@@ -66,6 +67,7 @@ struct VideoItem: Identifiable, Codable, Equatable {
         self.fileSize = 0
         self.isTrashed = false
         self.playedAt = nil
+        self.playbackPosition = 0
         self.trashedAt = nil
         self.deleteAfter = nil
         self.retryCount = 0
@@ -135,6 +137,7 @@ struct VideoItem: Identifiable, Codable, Equatable {
         case fileSize
         case isTrashed
         case playedAt
+        case playbackPosition
         case trashedAt
         case deleteAfter
         case retryCount
@@ -162,6 +165,7 @@ struct VideoItem: Identifiable, Codable, Equatable {
         fileSize = try container.decodeIfPresent(Int64.self, forKey: .fileSize) ?? 0
         isTrashed = try container.decodeIfPresent(Bool.self, forKey: .isTrashed) ?? false
         playedAt = try container.decodeIfPresent(Date.self, forKey: .playedAt)
+        playbackPosition = try container.decodeIfPresent(Double.self, forKey: .playbackPosition) ?? 0
         trashedAt = try container.decodeIfPresent(Date.self, forKey: .trashedAt)
         deleteAfter = try container.decodeIfPresent(Date.self, forKey: .deleteAfter)
         retryCount = try container.decodeIfPresent(Int.self, forKey: .retryCount) ?? 0

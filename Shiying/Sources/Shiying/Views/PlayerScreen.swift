@@ -62,7 +62,7 @@ final class PlayerViewModel: ObservableObject {
         """
     }
 
-    func load(item: VideoItem, onStarted: @escaping () -> Void, onFinished: @escaping () -> Void) async {
+    func load(item: VideoItem, resumeAt: Double, onStarted: @escaping () -> Void, onFinished: @escaping () -> Void) async {
         invalidatePendingLoad()
         let generation = loadGeneration
         startedHandler = onStarted
@@ -127,6 +127,7 @@ final class PlayerViewModel: ObservableObject {
                 isLoading = false
                 player.defaultRate = playbackRate
                 player.play()
+                resume(player, at: resumeAt)
                 seekNearEndIfRequested(player)
                 AppLog.info("player.play() called after item swap rate=\(String(format: "%.2f", playbackRate))")
                 return
@@ -150,6 +151,7 @@ final class PlayerViewModel: ObservableObject {
             UIApplication.shared.beginReceivingRemoteControlEvents()
             isLoading = false
             player.play()
+            resume(player, at: resumeAt)
             seekNearEndIfRequested(player)
             AppLog.info("player.play() called")
         } catch {
@@ -229,6 +231,12 @@ final class PlayerViewModel: ObservableObject {
         AppLog.info("player play tapped")
         player.defaultRate = playbackRate
         player.play()
+    }
+
+    private func resume(_ player: AVPlayer, at seconds: Double) {
+        guard seconds > 0.5, seconds < duration - 0.8 else { return }
+        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        currentTime = seconds
     }
 
     private func seekNearEndIfRequested(_ player: AVPlayer) {
@@ -671,6 +679,7 @@ struct PlayerScreen: View {
 
     @State private var currentItem: VideoItem
     @State private var isAdvancing = false
+    @State private var lastSavedPosition = 0.0
     @State private var isActive = true
     @State private var controlsVisible = true
     @State private var hideTask: Task<Void, Never>?
@@ -808,6 +817,7 @@ struct PlayerScreen: View {
             }
         }
         .onDisappear {
+            savePlaybackPositionIfNeeded()
             isActive = false
             hideTask?.cancel()
             cancelLongPressBoost()
@@ -1096,14 +1106,14 @@ struct PlayerScreen: View {
 
     private func startPlayback(_ item: VideoItem) async {
         guard isActive else { return }
-        await model.load(item: item) {
-            store.markPlayed(itemID: item.id)
+        await model.load(item: item, resumeAt: displayItem.playbackPosition) {
         } onFinished: {
             handlePlaybackFinished()
         }
     }
 
     private func handlePlaybackFinished() {
+        store.savePlaybackPosition(itemID: currentItem.id, position: model.duration)
         guard isActive else { return }
         guard !isAdvancing else { return }
         guard let next = nextPlayableItem else {
@@ -1142,6 +1152,11 @@ struct PlayerScreen: View {
             return fresh.isPlayable && !fresh.isTrashed && fresh.source == currentItem.source ? fresh : nil
         }
         return nil
+    }
+
+    private func savePlaybackPositionIfNeeded() {
+        guard model.currentTime > 0.5 else { return }
+        store.savePlaybackPosition(itemID: currentItem.id, position: model.currentTime)
     }
 
     private func toggleControls() {

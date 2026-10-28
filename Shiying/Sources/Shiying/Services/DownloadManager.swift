@@ -1,5 +1,48 @@
 import Foundation
 
+private enum DownloadRangeValidation {
+    struct ContentRange: Equatable {
+        let start: Int64
+        let end: Int64
+        let total: Int64
+    }
+
+    static func parse(_ value: String?) -> ContentRange? {
+        guard let value, value.hasPrefix("bytes ") else { return nil }
+        let fields = value.dropFirst(6).split(separator: "/", omittingEmptySubsequences: false)
+        guard fields.count == 2 else { return nil }
+        let bounds = fields[0].split(separator: "-", omittingEmptySubsequences: false)
+        func decimal(_ text: Substring) -> Int64? {
+            guard !text.isEmpty, text.utf8.allSatisfy({ (48...57).contains($0) }) else { return nil }
+            return Int64(text)
+        }
+        guard bounds.count == 2,
+              let start = decimal(bounds[0]), let end = decimal(bounds[1]),
+              let total = decimal(fields[1]), start <= end, end < total else { return nil }
+        return ContentRange(start: start, end: end, total: total)
+    }
+
+    static func partRange(index: Int, count: Int, total: Int64) -> ContentRange? {
+        guard count > 0, total > 0, Int64(count) <= total,
+              index >= 0, index < count else { return nil }
+        let chunk = total / Int64(count)
+        return ContentRange(
+            start: Int64(index) * chunk,
+            end: index == count - 1 ? total - 1 : Int64(index + 1) * chunk - 1,
+            total: total
+        )
+    }
+
+    static func matches(status: Int?, header: String?, range: ContentRange) -> Bool {
+        status == 206 && parse(header) == range
+    }
+
+    static func isComplete(status: Int?, header: String?, size: Int64) -> Bool {
+        guard status == 206, let range = parse(header) else { return false }
+        return range.start == 0 && range.end == range.total - 1 && size == range.total
+    }
+}
+
 final class DownloadManager: NSObject {
     static let shared = DownloadManager()
     static let sessionIdentifier = "com.ibas.shiying.downloads"
@@ -135,24 +178,10 @@ final class DownloadManager: NSObject {
             bytes.task.cancel()
             guard let http = response as? HTTPURLResponse else { return nil }
 
-            let contentLength = http.expectedContentLength > 0
-                ? http.expectedContentLength
-                : (http.value(forHTTPHeaderField: "Content-Length").flatMap { Int64($0) } ?? 0)
-
-            guard http.statusCode == 206 else {
-                if http.statusCode == 200, contentLength > 0 {
-                    return ProbeResult(totalBytes: contentLength, supportsRanges: false)
-                }
-                return nil
-            }
-
-            guard let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
-                  let slash = contentRange.lastIndex(of: "/"),
-                  let total = Int64(contentRange[contentRange.index(after: slash)...]
-                    .trimmingCharacters(in: .whitespaces)) else {
-                return nil
-            }
-            return ProbeResult(totalBytes: total, supportsRanges: total > 0)
+            guard http.statusCode == 206,
+                  let range = DownloadRangeValidation.parse(http.value(forHTTPHeaderField: "Content-Range")),
+                  range.start == 0, range.end == 0 else { return nil }
+            return ProbeResult(totalBytes: range.total, supportsRanges: true)
         } catch {
             AppLog.info("range probe failed host=\(url.host ?? "nil"): \(error.localizedDescription)")
             return nil
@@ -268,15 +297,19 @@ final class DownloadManager: NSObject {
 
     private func parseTaskDescription(_ description: String?) -> TaskMeta? {
         guard let description else { return nil }
-        let parts = description.split(separator: "|").map(String.init)
-        guard parts.count >= 2, let id = UUID(uuidString: parts[0]) else { return nil }
+        let parts = description.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count >= 2, let id = UUID(uuidString: parts[0]),
+              ["video", "audio"].contains(parts[1]) else { return nil }
 
-        if parts.count >= 8, parts[2] == "p",
-           let index = Int(parts[3]),
-           let count = Int(parts[4]),
-           let start = Int64(parts[5]),
-           let end = Int64(parts[6]),
-           let total = Int64(parts[7]) {
+        if parts.count != 2 {
+            guard parts.count == 8, parts[2] == "p",
+                  let index = Int(parts[3]),
+                  let count = Int(parts[4]),
+                  let start = Int64(parts[5]),
+                  let end = Int64(parts[6]),
+                  let total = Int64(parts[7]),
+                  DownloadRangeValidation.partRange(index: index, count: count, total: total)
+                    == DownloadRangeValidation.ContentRange(start: start, end: end, total: total) else { return nil }
             return TaskMeta(
                 itemID: id,
                 kind: parts[1],
@@ -324,12 +357,20 @@ final class DownloadManager: NSObject {
         try? FileManager.default.removeItem(at: AppPaths.partsDirectory(for: itemID, kind: kind))
     }
 
-    private static func partIndexes(in directory: URL) -> [Int] {
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return [] }
-        return names.compactMap { name in
-            guard name.hasPrefix("part-") else { return nil }
-            return Int(name.dropFirst(5))
+    private static func validatedParts(in directory: URL, count: Int, total: Int64) -> [Int: Int64]? {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return nil }
+        var sizes: [Int: Int64] = [:]
+        for name in names {
+            guard name.hasPrefix("part-"), let index = Int(name.dropFirst(5)),
+                  name == "part-\(index)",
+                  let range = DownloadRangeValidation.partRange(index: index, count: count, total: total),
+                  let values = try? directory.appendingPathComponent(name)
+                    .resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+                  values.isRegularFile == true, let size = values.fileSize,
+                  Int64(size) == range.end - range.start + 1 else { return nil }
+            sizes[index] = Int64(size)
         }
+        return sizes
     }
 
     private struct MergeError: LocalizedError {
@@ -337,11 +378,15 @@ final class DownloadManager: NSObject {
         var errorDescription: String? { message }
     }
 
-    private static func mergeParts(itemID: UUID, kind: String, count: Int) -> Result<Int64, MergeError> {
+    private static func mergeParts(itemID: UUID, kind: String, count: Int, total: Int64) -> Result<Int64, MergeError> {
         let directory = AppPaths.partsDirectory(for: itemID, kind: kind)
         let destination = AppPaths.mediaURL(for: itemID, kind: kind)
 
         do {
+            guard let parts = validatedParts(in: directory, count: count, total: total),
+                  parts.count == count else {
+                return .failure(MergeError(message: "下载的分片不完整"))
+            }
             try FileManager.default.createDirectory(
                 at: destination.deletingLastPathComponent(),
                 withIntermediateDirectories: true
@@ -365,12 +410,12 @@ final class DownloadManager: NSObject {
                 try? reader.close()
             }
 
-            try? FileManager.default.removeItem(at: directory)
             let size = Int64((try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
-            guard size > 10_000 else {
+            guard size == total else {
                 try? FileManager.default.removeItem(at: destination)
                 return .failure(MergeError(message: "下载的文件不完整"))
             }
+            try? FileManager.default.removeItem(at: directory)
             return .success(size)
         } catch {
             try? FileManager.default.removeItem(at: destination)
@@ -454,6 +499,7 @@ final class DownloadManager: NSObject {
 
         var allDone = false
         var isCancelled = false
+        var invalidParts = false
         stateQueue.sync {
             if cancelledItems.contains(meta.itemID)
                 || splitDisabled[meta.itemID]?.contains(meta.kind) == true {
@@ -461,19 +507,15 @@ final class DownloadManager: NSObject {
                 return
             }
 
-            var completed = completedParts[meta.itemID]?[meta.kind] ?? []
-            completed.insert(index)
-
-            var bytesByPart = partBytes[meta.itemID]?[meta.kind] ?? [:]
-
-            // Include parts that finished before an app relaunch.
-            let onDisk = Self.partIndexes(in: directory)
-            for diskIndex in onDisk {
-                completed.insert(diskIndex)
-                let url = directory.appendingPathComponent("part-\(diskIndex)")
-                bytesByPart[diskIndex] = Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+            guard let onDisk = Self.validatedParts(in: directory, count: meta.partCount, total: meta.totalBytes) else {
+                invalidParts = true
+                return
             }
-            bytesByPart[index] = size
+            let completed = Set(onDisk.keys)
+            var bytesByPart = partBytes[meta.itemID]?[meta.kind] ?? [:]
+            for (diskIndex, diskSize) in onDisk {
+                bytesByPart[diskIndex] = diskSize
+            }
 
             var kinds = partBytes[meta.itemID] ?? [:]
             kinds[meta.kind] = bytesByPart
@@ -483,11 +525,16 @@ final class DownloadManager: NSObject {
             completedByKind[meta.kind] = completed
             completedParts[meta.itemID] = completedByKind
 
-            allDone = completed.count >= meta.partCount
+            allDone = completed.count == meta.partCount
         }
 
         if isCancelled {
             removeParts(itemID: meta.itemID, kind: meta.kind)
+            return
+        }
+
+        if invalidParts {
+            abortSplit(itemID: meta.itemID, kind: meta.kind, message: "已保存的分片范围或长度无效", fallbackToSingle: true)
             return
         }
 
@@ -517,7 +564,7 @@ final class DownloadManager: NSObject {
             return
         }
 
-        switch Self.mergeParts(itemID: meta.itemID, kind: meta.kind, count: count) {
+        switch Self.mergeParts(itemID: meta.itemID, kind: meta.kind, count: count, total: meta.totalBytes) {
         case .success(let size):
             stateQueue.sync {
                 partBytes[meta.itemID]?[meta.kind] = nil
@@ -528,8 +575,7 @@ final class DownloadManager: NSObject {
             deliverFile(id: meta.itemID, kind: meta.kind)
         case .failure(let error):
             releaseCompletion(itemID: meta.itemID, kind: meta.kind)
-            removeParts(itemID: meta.itemID, kind: meta.kind)
-            deliverError(id: meta.itemID, kind: meta.kind, message: error.message)
+            abortSplit(itemID: meta.itemID, kind: meta.kind, message: error.message, fallbackToSingle: true)
         }
     }
 
@@ -567,9 +613,13 @@ final class DownloadManager: NSObject {
     /// cannot merge into a file with a hole or a truncated fragment. When the
     /// server merely ignored the byte range, re-download the file over one
     /// connection instead of failing the item.
-    private func abortSplit(itemID: UUID, kind: String, message: String, fallbackToSingle: Bool) {
+    private func abortSplit(itemID: UUID, kind: String, message: String, fallbackToSingle: Bool, sourceURL: URL? = nil) {
         stateQueue.async { [weak self] in
-            guard let self else { return }
+            guard let self,
+                  self.splitDisabled[itemID]?.contains(kind) != true else { return }
+            if self.sourceURLs[itemID]?[kind] == nil, let sourceURL {
+                self.sourceURLs[itemID, default: [:]][kind] = Self.urlWithoutRangeParameter(sourceURL)
+            }
             var disabled = self.splitDisabled[itemID] ?? []
             disabled.insert(kind)
             self.splitDisabled[itemID] = disabled
@@ -601,37 +651,13 @@ final class DownloadManager: NSObject {
         }
     }
 
-    /// A server that ignores `Range` returns 200 with the whole file. Keep that
-    /// task, cancel the other parts, and let it complete as a normal download.
-    private func promoteToSingle(task: URLSessionDownloadTask, meta: TaskMeta) {
-        stateQueue.async { [weak self] in
-            guard let self else { return }
-            var disabled = self.splitDisabled[meta.itemID] ?? []
-            disabled.insert(meta.kind)
-            self.splitDisabled[meta.itemID] = disabled
-
-            var bytesByKind = self.partBytes[meta.itemID] ?? [:]
-            bytesByKind[meta.kind] = nil
-            self.partBytes[meta.itemID] = bytesByKind
-
-            var completedByKind = self.completedParts[meta.itemID] ?? [:]
-            completedByKind[meta.kind] = []
-            self.completedParts[meta.itemID] = completedByKind
-            self.removeParts(itemID: meta.itemID, kind: meta.kind)
-
-            task.taskDescription = "\(meta.itemID.uuidString)|\(meta.kind)"
-
-            self.session.getAllTasks { tasks in
-                for other in tasks where other.taskIdentifier != task.taskIdentifier {
-                    guard let otherMeta = self.parseTaskDescription(other.taskDescription),
-                          otherMeta.itemID == meta.itemID,
-                          otherMeta.kind == meta.kind,
-                          otherMeta.partIndex != nil else { continue }
-                    other.cancel()
-                }
-            }
-            AppLog.info("range ignored, promoted \(meta.kind) task to single connection item=\(meta.itemID)")
-        }
+    private func acceptsPartResponse(_ response: URLResponse?, meta: TaskMeta) -> Bool {
+        let http = response as? HTTPURLResponse
+        return DownloadRangeValidation.matches(
+            status: http?.statusCode,
+            header: http?.value(forHTTPHeaderField: "Content-Range"),
+            range: .init(start: meta.rangeStart, end: meta.rangeEnd, total: meta.totalBytes)
+        )
     }
 }
 
@@ -646,8 +672,9 @@ extension DownloadManager: URLSessionDownloadDelegate {
         guard let meta = parseTaskDescription(downloadTask.taskDescription) else { return }
 
         if let partIndex = meta.partIndex {
-            if let http = downloadTask.response as? HTTPURLResponse, http.statusCode == 200 {
-                promoteToSingle(task: downloadTask, meta: meta)
+            guard acceptsPartResponse(downloadTask.response, meta: meta) else {
+                downloadTask.cancel()
+                abortSplit(itemID: meta.itemID, kind: meta.kind, message: "分片响应范围无效", fallbackToSingle: true, sourceURL: downloadTask.originalRequest?.url)
                 return
             }
 
@@ -697,25 +724,32 @@ extension DownloadManager: URLSessionDownloadDelegate {
         didFinishDownloadingTo location: URL
     ) {
         guard let meta = parseTaskDescription(downloadTask.taskDescription) else { return }
-        let statusCode = (downloadTask.response as? HTTPURLResponse)?.statusCode
-
-        if let statusCode, !(200..<300).contains(statusCode) {
-            try? FileManager.default.removeItem(at: location)
-            deliverError(id: meta.itemID, kind: meta.kind, message: "下载服务器返回错误（HTTP \(statusCode)）")
-            return
-        }
+        let http = downloadTask.response as? HTTPURLResponse
+        let statusCode = http?.statusCode
 
         if meta.partIndex != nil {
-            if statusCode == 200 {
-                // Range was ignored: this temp file is the complete media file.
-                promoteToSingle(task: downloadTask, meta: meta)
-                finishSingle(meta: meta, location: location)
-            } else {
-                finishPart(meta: meta, location: location)
+            stateQueue.sync {
+                if sourceURLs[meta.itemID]?[meta.kind] == nil, let url = downloadTask.originalRequest?.url {
+                    sourceURLs[meta.itemID, default: [:]][meta.kind] = Self.urlWithoutRangeParameter(url)
+                }
             }
+            guard acceptsPartResponse(downloadTask.response, meta: meta) else {
+                try? FileManager.default.removeItem(at: location)
+                abortSplit(itemID: meta.itemID, kind: meta.kind, message: "分片响应范围无效", fallbackToSingle: true, sourceURL: downloadTask.originalRequest?.url)
+                return
+            }
+            finishPart(meta: meta, location: location)
             return
         }
 
+        let size = Int64((try? location.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        guard statusCode == 200 || DownloadRangeValidation.isComplete(
+            status: statusCode, header: http?.value(forHTTPHeaderField: "Content-Range"), size: size
+        ) else {
+            try? FileManager.default.removeItem(at: location)
+            deliverError(id: meta.itemID, kind: meta.kind, message: "下载服务器返回无效或不完整的响应")
+            return
+        }
         finishSingle(meta: meta, location: location)
     }
 

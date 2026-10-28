@@ -3,6 +3,7 @@ import SwiftUI
 struct MiniPlayerBar: View {
     @ObservedObject var session: PlaybackSession
     @ObservedObject var model: PlayerViewModel
+    @ObservedObject var store: AppStore
     let item: VideoItem
 
     @State private var glowPulse = false
@@ -55,6 +56,18 @@ struct MiniPlayerBar: View {
                 }
                 .buttonStyle(ScaleButtonStyle())
                 .accessibilityLabel(model.isPlaying ? "暂停" : "播放")
+
+                Button {
+                    session.playNext(using: store)
+                } label: {
+                    Image(systemName: "forward.end.fill")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(Palette.secondary)
+                        .frame(width: 30, height: 30)
+                        .background(Circle().fill(.white.opacity(0.06)))
+                }
+                .buttonStyle(ScaleButtonStyle())
+                .accessibilityLabel("播放下一个视频")
 
                 Button {
                     AppLog.info("mini player closed")

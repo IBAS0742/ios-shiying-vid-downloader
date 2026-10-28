@@ -50,7 +50,7 @@ struct RootView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 if playback.isMinimized, let item = playback.currentItem {
-                    MiniPlayerBar(session: playback, model: playback.model, item: item)
+                    MiniPlayerBar(session: playback, model: playback.model, store: store, item: item)
                 }
                 BottomTabBar(
                     selection: $tab,
@@ -119,11 +119,14 @@ struct RootView: View {
             }
             if env["SHIYING_OPEN_FIRST"] == "1",
                let first = firstOpenableItem(env: env) {
-                AppLog.info("auto open first item: \(first.title) trashed=\(first.isTrashed) source=\(first.source.rawValue)")
                 playback.start(
                     item: first,
                     queue: store.playbackQueue(for: first)
                 )
+                playback.minimize()
+            } else if let saved = savedPlaybackItem() {
+                playback.start(item: saved, queue: store.playbackQueue(for: saved))
+                playback.minimize()
             }
             if env["SHIYING_OPEN_TRASH"] == "1" {
                 AppLog.info("auto open trash tab")
@@ -191,6 +194,12 @@ struct RootView: View {
         }
         .preferredColorScheme(.dark)
         .tint(Palette.amber)
+    }
+
+    private func savedPlaybackItem() -> VideoItem? {
+        guard let raw = UserDefaults.standard.string(forKey: "shiying.playback.savedItem"),
+              let id = UUID(uuidString: raw) else { return nil }
+        return store.items.first(where: { $0.id == id && $0.isPlayable && !$0.isTrashed })
     }
 
     private func firstOpenableItem(env: [String: String]) -> VideoItem? {

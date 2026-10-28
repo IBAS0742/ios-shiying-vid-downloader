@@ -51,12 +51,17 @@ enum PlaybackAssetBuilder {
             throw PlaybackError.noAudioTrack
         }
 
-        let videoDuration = try await videoAsset.load(.duration)
-        let audioDuration = try await audioAsset.load(.duration)
-        guard videoDuration.isNumeric, videoDuration.seconds.isFinite, videoDuration.seconds > 0 else {
+        // AVFoundation reports double the real duration for YouTube DASH fMP4,
+        // so derive the true bounds from the container's mdhd boxes instead.
+        let videoSeconds = try realDuration(fileURL: item.videoFileURL, kind: "vide")
+        let audioSeconds = try realDuration(fileURL: item.audioFileURL, kind: "soun")
+        let durationSeconds = min(videoSeconds, audioSeconds)
+        guard durationSeconds > 0, durationSeconds.isFinite else {
             throw PlaybackError.invalidAsset
         }
-        let duration = videoDuration < audioDuration ? videoDuration : audioDuration
+
+        let start = CMTime.zero
+        let duration = CMTime(seconds: durationSeconds, preferredTimescale: 600)
 
         let composition = AVMutableComposition()
         guard let videoTrack = composition.addMutableTrack(
@@ -70,17 +75,28 @@ enum PlaybackAssetBuilder {
         }
 
         try videoTrack.insertTimeRange(
-            CMTimeRange(start: .zero, duration: duration),
+            CMTimeRange(start: start, duration: duration),
             of: sourceVideo,
             at: .zero
         )
         try audioTrack.insertTimeRange(
-            CMTimeRange(start: .zero, duration: duration),
+            CMTimeRange(start: start, duration: duration),
             of: sourceAudio,
             at: .zero
         )
         videoTrack.preferredTransform = try await sourceVideo.load(.preferredTransform)
 
         return composition
+    }
+
+    private static func realDuration(fileURL: URL, kind: String) throws -> Double {
+        let tracks = try MP4Probe.trackDurations(fileURL: fileURL)
+        if let match = tracks.first(where: { $0.kind == kind }) {
+            return match.durationSeconds
+        }
+        if let fallback = tracks.first(where: { $0.durationSeconds > 0 }) {
+            return fallback.durationSeconds
+        }
+        throw PlaybackError.invalidAsset
     }
 }
