@@ -686,6 +686,10 @@ struct PlayerScreen: View {
     @State private var isScrubbing = false
     @State private var scrubTarget: Double = 0
     @State private var isPressingVideo = false
+    @State private var isPullingDown = false
+    @State private var isHorizontalSeeking = false
+    @State private var seekStartTime: Double = 0
+    @State private var seekStartX: CGFloat = 0
     @State private var boostStartTask: Task<Void, Never>?
 
     init(item: VideoItem, store: AppStore, session: PlaybackSession) {
@@ -719,8 +723,8 @@ struct PlayerScreen: View {
                 }
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 0)
-                        .onChanged { _ in handleVideoPressChanged() }
-                        .onEnded { _ in handleVideoPressEnded() }
+                        .onChanged { handleDragChanged($0) }
+                        .onEnded { handleDragEnded($0) }
                 )
 
             if model.isLoading {
@@ -736,6 +740,11 @@ struct PlayerScreen: View {
             if model.isBoosting {
                 boostHUD
                     .transition(.opacity.combined(with: .scale(scale: 0.94)))
+            }
+
+            if isHorizontalSeeking {
+                seekHUD
+                    .transition(.opacity)
             }
 
             if model.isDebugHUDEnabled {
@@ -870,6 +879,26 @@ struct PlayerScreen: View {
             .overlay(Capsule().strokeBorder(.white.opacity(0.16), lineWidth: 1))
             .padding(.top, 72)
             Spacer()
+        }
+        .allowsHitTesting(false)
+    }
+
+    private var seekHUD: some View {
+        VStack {
+            Spacer()
+            VStack(spacing: 5) {
+                Text("\(timeText(scrubTarget)) / \(timeText(model.duration))")
+                    .font(.system(size: 16, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white)
+                Text(scrubTarget >= model.currentTime ? "快进" : "快退")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.72))
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 10)
+            .background(Capsule().fill(.black.opacity(0.62)))
+            .overlay(Capsule().strokeBorder(.white.opacity(0.16), lineWidth: 1))
+            .padding(.bottom, 190)
         }
         .allowsHitTesting(false)
     }
@@ -1190,6 +1219,77 @@ struct PlayerScreen: View {
             model.beginBoost()
             AppLog.info("player boost start rate=\(rateText(model.playbackRate))")
         }
+    }
+
+    private func handleDragChanged(_ value: DragGesture.Value) {
+        let dx = value.translation.width
+        let dy = value.translation.height
+
+        // Pull down to minimize (portrait) / exit landscape (landscape).
+        if !isPullingDown && !isHorizontalSeeking, dy > 28, dy > abs(dx) * 1.4 {
+            isPullingDown = true
+            cancelLongPressBoost()
+            return
+        }
+
+        // Horizontal swipe scrubs through the timeline.
+        if !isHorizontalSeeking && !isPullingDown, abs(dx) > 18, abs(dx) > abs(dy) * 1.4 {
+            isHorizontalSeeking = true
+            cancelLongPressBoost()
+            seekStartTime = model.currentTime
+            seekStartX = value.startLocation.x
+        }
+
+        if isHorizontalSeeking {
+            let delta = value.location.x - seekStartX
+            let target = seekStartTime + Double(delta) * seekScale
+            scrubTarget = min(max(target, 0), max(model.duration, 0))
+            return
+        }
+
+        // Otherwise treat as a long press (temporary speed boost).
+        if !isPullingDown && !isHorizontalSeeking {
+            handleVideoPressChanged()
+        }
+    }
+
+    private func handleDragEnded(_ value: DragGesture.Value) {
+        if isHorizontalSeeking {
+            isHorizontalSeeking = false
+            model.seek(to: scrubTarget)
+            showControls()
+            return
+        }
+        if isPullingDown {
+            isPullingDown = false
+            if value.translation.height > 110 {
+                performPullDown()
+            }
+            return
+        }
+        handleVideoPressEnded()
+    }
+
+    private var seekScale: Double {
+        let width = UIScreen.main.bounds.width
+        return width > 0 ? 150.0 / Double(width) : 1.0
+    }
+
+    private func performPullDown() {
+        if isCurrentlyLandscape {
+            AppLog.info("player pull down exit landscape")
+            toggleOrientation()
+        } else {
+            AppLog.info("player pull down minimize")
+            session.minimize()
+        }
+    }
+
+    private var isCurrentlyLandscape: Bool {
+        guard UIDevice.current.userInterfaceIdiom != .pad else { return false }
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first
+        return scene?.interfaceOrientation.isLandscape ?? UIDevice.current.orientation.isLandscape
     }
 
     private func handleVideoPressEnded() {
